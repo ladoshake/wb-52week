@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# WorkBuddy project metadata
+.workbuddy/
+
+# Runtime API cache (regenerated on each refresh)
+data/
+
+# OS / editor
+.DS_Store
