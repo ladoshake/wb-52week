@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>A股股价创52周新低 公司列表</title>
+<script src="universe.js"></script>
 <style>
   :root {
     --bg:#f5f7fa; --card:#fff; --line:#e6e9ef; --text:#1f2733; --muted:#7a869a;
@@ -160,7 +161,8 @@ function emJsonp(pn,fs){
     return null;
   })();
 }
-async function getUniverse(){
+/* 实时清单（东方财富，best-effort，仅用于增量补充新上市股票，失败不影响主清单） */
+async function getUniverseLive(){
   var FS=["m:1+t:2","m:0+t:6","m:1+t:8","m:0+t:23","m:0+t:81","m:1+t:3"];
   var seen={}, list=[];
   for(var fi=0; fi<FS.length; fi++){
@@ -169,26 +171,30 @@ async function getUniverse(){
       var diff = await emJsonp(pn, fs);
       if(!diff || !diff.length) break;
       for(var k=0;k<diff.length;k++){
-        var code=diff[k].f12;
-        if(!code) continue;
+        var code=diff[k].f12; if(!code) continue;
         var sym=symOf(code);
-        if(seen[sym]) continue; seen[sym]=1;
-        list.push(sym);
+        if(seen[sym]) continue; seen[sym]=1; list.push(sym);
       }
       if(diff.length<500) break;
       pn++; await sleep(100);
     }
   }
-  // 实时清单不足时，回退到构建期内置的静态清单（codes.js）
-  if(list.length < 3000 && window.__UNIVERSE__ && window.__UNIVERSE__.length){
-    var fb=[]; seen={};
-    for(var i=0;i<window.__UNIVERSE__.length;i++){
-      var s=symOf(String(window.__UNIVERSE__[i]));
-      if(seen[s]) continue; seen[s]=1; fb.push(s);
+  return list;
+}
+/* 主清单：优先用烘焙的完整 A股代码表（universe.js，稳定可靠）；东方财富实时清单仅作增量补充 */
+async function getUniverse(){
+  var baked = (window.__UNIVERSE__||[]).map(function(c){ return symOf(String(c)); });
+  var list = baked.slice(), source = baked.length ? "static" : "empty";
+  try{
+    var live = await getUniverseLive();
+    if(live && live.length){
+      var seen={}; list.forEach(function(s){seen[s]=1;});
+      live.forEach(function(s){ if(!seen[s]){ seen[s]=1; list.push(s); } });
+      if(live.length > baked.length*0.5) source = "live";
     }
-    if(fb.length > list.length){ return {syms:fb, source:"static"}; }
-  }
-  return {syms:list, source:"live"};
+  }catch(e){ /* 实时清单失败不影响主清单 */ }
+  if(!list.length) throw new Error("内置股票清单为空，请重新部署页面");
+  return {syms:list, source:source};
 }
 
 /* ---------- 取数：腾讯行情（脚本注入，跨域） ---------- */
@@ -217,14 +223,22 @@ function parseTencent(raw){
   var dist = (price-low)/low*100;
   return {name:name, price:price, chg:chg, low:low, mv:mv, dist:dist};
 }
+async function tencentBatchRetry(syms, tries){
+  tries = tries||2;
+  for(var t=0;t<tries;t++){
+    try{ return await tencentBatch(syms); }
+    catch(e){ if(t<tries-1) await sleep(250); }
+  }
+  return {};
+}
 async function getQuotes(syms, onProgress){
-  var BATCH=60, CONC=6, out=[], i=0, done=0;
+  var BATCH=100, CONC=8, out=[], i=0, done=0;
   async function worker(){
     while(i<syms.length){
       var start=i; i+=BATCH;
       var slice=syms.slice(start,start+BATCH);
       try{
-        var map=await tencentBatch(slice);
+        var map=await tencentBatchRetry(slice);
         for(var j=0;j<slice.length;j++){
           var raw=map[slice[j]]; if(!raw) continue;
           var q=parseTencent(raw); if(q) out.push({sym:slice[j], q:q});
@@ -344,7 +358,7 @@ async function refresh(){
     var uni = await getUniverse();
     var syms = uni.syms;
     if(!syms.length) throw new Error("未能获取股票列表（东方财富接口可能被网络/限流拦截，请稍后重试）");
-    var srcTip = uni.source==="static" ? "（实时清单受限，已用内置清单兜底）" : "";
+    var srcTip = uni.source==="live" ? "" : "（基于内置完整清单）";
     setStatus("正在拉取行情数据（0/"+syms.length+"）…"+srcTip);
     var quotes = await getQuotes(syms, function(d,t){
       setStatus("正在拉取行情数据（"+d+"/"+t+"）…"+srcTip);
