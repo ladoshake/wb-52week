@@ -14,13 +14,7 @@
          background:var(--bg); color:var(--text); font-size:14px; }
   .wrap { max-width:1120px; margin:0 auto; padding:24px 18px 60px; }
   h1 { font-size:22px; margin:0 0 4px; }
-  .sub { color:var(--muted); font-size:13px; line-height:1.6; flex:1; }
-  .toprow { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; }
-  .refreshBtn { padding:7px 14px; border:1px solid var(--line); background:#fff; border-radius:9px;
-         font-size:13px; cursor:pointer; color:var(--text); margin-left:auto; flex-shrink:0; transition:.15s; }
-  .refreshBtn:hover { border-color:var(--accent); color:var(--accent); }
-  .refreshBtn:disabled { opacity:.6; cursor:default; color:var(--muted); }
-  #updated { color:var(--muted); font-size:12px; }
+  .sub { color:var(--muted); font-size:13px; line-height:1.6; margin-bottom:10px; }
   .cards { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:4px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:9px;
            padding:8px 14px; min-width:92px; flex:1; cursor:pointer; transition:.15s; user-select:none; }
@@ -55,9 +49,7 @@
   @media (max-width:640px) {
     .wrap { padding:14px 11px 48px; }
     h1 { font-size:18px; margin-bottom:2px; }
-    .sub { font-size:12px; line-height:1.4; }
-    .toprow { flex-direction:row; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
-    .refreshBtn { width:auto; padding:5px 11px; font-size:12px; text-align:center; margin-left:0; flex-shrink:0; }
+    .sub { font-size:12px; line-height:1.4; margin-bottom:8px; }
     .cards { display:grid; grid-template-columns:repeat(5,1fr); gap:4px; margin-bottom:4px; }
     .card { min-width:0; flex:none; padding:6px 2px; border-radius:8px; text-align:center; }
     .card .v { font-size:15px; }
@@ -72,11 +64,7 @@
 <body>
 <div class="wrap">
   <h1>A股股价创52周新低 · 公司列表</h1>
-  <div class="toprow">
-    <div class="sub">收盘价距52周最低≤5%即计入（已排除数据缺失及新股）。更新：<span id="genTime">2026-07-16 15:42</span> · 腾讯自选股（仅供参考）</div>
-    <button id="refreshBtn" class="refreshBtn" onclick="refresh()">↻ 刷新数据</button>
-  </div>
-  <div><span id="updated"></span></div>
+  <div class="sub">收盘价距52周最低≤5%即计入（已排除数据缺失及新股）。更新：<span id="genTime">2026-07-16 15:42</span> · 腾讯自选股（仅供参考）</div>
 
   <div class="cards" id="cards"></div>
   <div class="hint" id="hint"></div>
@@ -103,7 +91,7 @@
     <span class="tag">口径</span>
     “收盘价距52周最低 ≤ 5%”：收盘收在历史最低上方 5% 以内（含等于或低于）即计入，当前共 <b id="noteNear">712</b> 只。<br>
     <span class="tag">说明</span>
-    “距52周低点” = (最新价 − 52周最低) / 52周最低；“总市值”单位为亿元。点击模块卡片可一键筛选；点击任意表头可按该列升降序排序；点击右上角「↻ 刷新数据」可即时拉取最新收盘数据（需通过本地服务打开）。<br>
+    "距52周低点" = (最新价 − 52周最低) / 52周最低；"总市值"单位为亿元。点击模块卡片可一键筛选；点击任意表头可按该列升降序排序。<br>
     本报告仅作客观数据筛选与展示，不构成任何投资建议。市场有风险，决策需谨慎。
   </div>
 </div>
@@ -192,25 +180,6 @@ function doSort(i,isStr,dir){
   lastCol=i; lastDir=dir;
   document.querySelectorAll('#t th').forEach(th=>th.classList.remove('sorted'));
   document.querySelectorAll('#t th')[i].classList.add('sorted');
-}
-async function refresh(){
-  var btn=document.getElementById('refreshBtn');
-  var old=btn.textContent; btn.disabled=true; btn.textContent='刷新中…';
-  try{
-    var resp=await fetch('/api/refresh?t='+Date.now());
-    if(!resp.ok) throw new Error('bad');
-    var j=await resp.json();
-    DATA=j.rows; STATS=j.stats;
-    document.getElementById('genTime').textContent=STATS.now;
-    document.getElementById('noteNear').textContent=STATS.near_n;
-    buildCards(); buildRows(); render();
-    document.getElementById('updated').textContent='数据已更新 · '+STATS.now;
-  }catch(e){
-    document.getElementById('updated').textContent='实时刷新需通过本地服务打开（已尝试重载静态文件）';
-    location.reload();
-  }finally{
-    btn.disabled=false; btn.textContent=old;
-  }
 }
 // 初始化
 document.getElementById('genTime').textContent=STATS.now;
