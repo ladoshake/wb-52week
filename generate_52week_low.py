@@ -11,6 +11,7 @@ DATA = os.path.join(HERE, "data")
 RAW_NEAR = os.path.join(DATA, "near_raw.json")   # 收盘接近≤5%：ClosePrice <= Week52Low*1.05
 SNAP     = os.path.join(DATA, "snapshot.json")   # 给本地服务用的 JSON 快照
 OUT = os.path.join(HERE, "股价创52周新低_A股列表.html")
+OUT_INDEX = os.path.join(HERE, "index.html")  # 供 Vercel / 静态托管使用的默认入口页
 
 # 托管运行时路径（隔离、稳定）
 NODE = "/Users/green/.workbuddy/binaries/node/versions/22.22.2/bin/node"
@@ -318,6 +319,8 @@ def write_html(rows, stats):
     html = render_html(rows, stats)
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(html)
+    with open(OUT_INDEX, "w", encoding="utf-8") as f:
+        f.write(html)
     with open(SNAP, "w", encoding="utf-8") as f:
         json.dump({"rows": rows, "stats": stats}, f, ensure_ascii=False)
 
@@ -325,6 +328,7 @@ def main():
     rows, stats = build_dataset()
     write_html(rows, stats)
     print("WROTE", OUT)
+    print("WROTE", OUT_INDEX)
     print("主口径(收盘距52周最低≤5%)=", stats["near_n"],
           "| 上海=", stats["sh"], "深圳=", stats["sz"],
           "科创=", stats["kc"], "创业=", stats["cy"])
