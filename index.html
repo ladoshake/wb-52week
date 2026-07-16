@@ -146,30 +146,49 @@ function jsonp(url, cbName, timeoutMs){
     document.head.appendChild(s);
   });
 }
+var EM_HOSTS=["push2.eastmoney.com","push2delay.eastmoney.com","82.push2.eastmoney.com","29.push2.eastmoney.com"];
+function emJsonp(pn,fs){
+  // 依次尝试多个东方财富镜像主机，任一成功即返回；全失败抛错
+  return (async function(){
+    for(var hi=0; hi<EM_HOSTS.length; hi++){
+      try{
+        var url="https://"+EM_HOSTS[hi]+"/api/qt/clist/get?ut=bd1d9ddb04089700cf9c27f6f7426281&pn="+pn+"&pz=500&po=1&np=1&fltt=2&invt=2&fs="+encodeURIComponent(fs)+"&fields=f12,f14";
+        var d=await jsonp(url,"em",9000);
+        if(d && d.data && d.data.diff) return d.data.diff;
+      }catch(e){ /* 换下一个主机 */ }
+    }
+    return null;
+  })();
+}
 async function getUniverse(){
   var FS=["m:1+t:2","m:0+t:6","m:1+t:8","m:0+t:23","m:0+t:81","m:1+t:3"];
   var seen={}, list=[];
   for(var fi=0; fi<FS.length; fi++){
     var fs=FS[fi], pn=1;
-    while(pn<=40){
-      var data;
-      try{
-        data = await jsonp("https://push2.eastmoney.com/api/qt/clist/get?ut=bd1d9ddb04089700cf9c27f6f7426281&pn="+pn+"&pz=1000&po=1&np=1&fltt=2&invt=2&fs="+encodeURIComponent(fs)+"&fields=f12,f13,f14","em");
-      }catch(e){ break; }
-      var diff = data && data.data && data.data.diff;
+    while(pn<=60){
+      var diff = await emJsonp(pn, fs);
       if(!diff || !diff.length) break;
       for(var k=0;k<diff.length;k++){
-        var it=diff[k], code=it.f12, name=it.f14||"";
+        var code=diff[k].f12;
         if(!code) continue;
         var sym=symOf(code);
         if(seen[sym]) continue; seen[sym]=1;
-        list.push({sym:sym, code:code, name:name});
+        list.push(sym);
       }
-      if(diff.length<1000) break;
-      pn++; await sleep(120);
+      if(diff.length<500) break;
+      pn++; await sleep(100);
     }
   }
-  return list;
+  // 实时清单不足时，回退到构建期内置的静态清单（codes.js）
+  if(list.length < 3000 && window.__UNIVERSE__ && window.__UNIVERSE__.length){
+    var fb=[]; seen={};
+    for(var i=0;i<window.__UNIVERSE__.length;i++){
+      var s=symOf(String(window.__UNIVERSE__[i]));
+      if(seen[s]) continue; seen[s]=1; fb.push(s);
+    }
+    if(fb.length > list.length){ return {syms:fb, source:"static"}; }
+  }
+  return {syms:list, source:"live"};
 }
 
 /* ---------- 取数：腾讯行情（脚本注入，跨域） ---------- */
@@ -192,14 +211,14 @@ function tencentBatch(syms){
 }
 function parseTencent(raw){
   var p=raw.split("~");
-  var price=parseFloat(p[3]), prev=parseFloat(p[4]), low=parseFloat(p[48]), mv=parseFloat(p[44]);
+  var name=p[1]||"", price=parseFloat(p[3]), prev=parseFloat(p[4]), low=parseFloat(p[48]), mv=parseFloat(p[44]);
   if(!price || price<=0 || !low || low<=0) return null;
   var chg = prev ? (price-prev)/prev*100 : 0;
   var dist = (price-low)/low*100;
-  return {price:price, chg:chg, low:low, mv:mv, dist:dist};
+  return {name:name, price:price, chg:chg, low:low, mv:mv, dist:dist};
 }
-async function getQuotes(syms){
-  var BATCH=80, CONC=6, out=[], i=0;
+async function getQuotes(syms, onProgress){
+  var BATCH=60, CONC=6, out=[], i=0, done=0;
   async function worker(){
     while(i<syms.length){
       var start=i; i+=BATCH;
@@ -211,7 +230,9 @@ async function getQuotes(syms){
           var q=parseTencent(raw); if(q) out.push({sym:slice[j], q:q});
         }
       }catch(e){ /* 该批次失败则跳过，继续 */ }
-      await sleep(60);
+      done+=slice.length;
+      if(onProgress) onProgress(Math.min(done,syms.length), syms.length);
+      await sleep(50);
     }
   }
   var ws=[]; for(var c=0;c<CONC;c++) ws.push(worker());
@@ -320,16 +341,20 @@ async function refresh(){
   setLoading(true);
   try{
     setStatus("正在获取全市场股票列表…");
-    var universe = await getUniverse();
-    if(!universe.length) throw new Error("未能从行情接口获取股票列表（可能被网络/接口限制）");
-    setStatus("正在拉取行情数据（"+universe.length+" 只）…");
-    var quotes = await getQuotes(universe.map(function(u){return u.sym;}));
-    var nameMap={}; universe.forEach(function(u){nameMap[u.sym]=u.name;});
+    var uni = await getUniverse();
+    var syms = uni.syms;
+    if(!syms.length) throw new Error("未能获取股票列表（东方财富接口可能被网络/限流拦截，请稍后重试）");
+    var srcTip = uni.source==="static" ? "（实时清单受限，已用内置清单兜底）" : "";
+    setStatus("正在拉取行情数据（0/"+syms.length+"）…"+srcTip);
+    var quotes = await getQuotes(syms, function(d,t){
+      setStatus("正在拉取行情数据（"+d+"/"+t+"）…"+srcTip);
+    });
+    if(!quotes.length) throw new Error("行情接口未返回数据（qt.gtimg.cn 可能被拦截，请稍后重试）");
     var rows=[];
     quotes.forEach(function(item){
-      var q=item.q, name=nameMap[item.sym]||"";
-      if(name.startsWith("N")) return;            // 排除上市首日新股
-      if(q.dist>5 || q.mv<=0) return;            // 仅保留 距52周最低 ≤ 5% 且市值有效
+      var q=item.q, name=q.name||"";
+      if(!name || name.startsWith("N")) return;   // 排除无名/上市首日新股
+      if(q.dist>5 || q.mv<=0) return;             // 仅保留 距52周最低 ≤ 5% 且市值有效
       var cl=classify(item.sym);
       rows.push({code:cl.code, name:name, cp:q.price, chg:q.chg, low:q.low, dist:q.dist, mcap:q.mv, market:cl.market, board:cl.board});
     });
@@ -339,7 +364,7 @@ async function refresh(){
     document.getElementById("noteNear").textContent=STATS.near_n;
     moduleField=""; moduleVal="";
     buildCards(); buildRows(); render();
-    setStatus("更新成功 · "+STATS.now+" · 全市场 "+universe.length+" 只，符合条件 "+rows.length+" 只");
+    setStatus("更新成功 · "+STATS.now+" · 覆盖 "+quotes.length+" 只，符合条件 "+rows.length+" 只"+srcTip);
   }catch(e){
     setStatus("刷新失败："+e.message);
   }finally{
