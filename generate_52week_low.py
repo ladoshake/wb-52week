@@ -144,6 +144,11 @@ TEMPLATE = r"""<!DOCTYPE html>
     .note { font-size:12px; line-height:1.7; }
   }
 </style>
+<!-- Vercel Web Analytics -->
+<script>
+  window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+</script>
+<script defer src="/_vercel/insights/script.js"></script>
 </head>
 <body>
 <div class="wrap">
