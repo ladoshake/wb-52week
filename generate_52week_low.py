@@ -1,41 +1,60 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 端到端生成「A股股价创52周新低」HTML 日报：
-#   1) 调用 westock-tool 拉取最新收盘数据（仅主口径：收盘价距 52周最低 ≤ 5%）
-#   2) 生成可交互 HTML 报告到本脚本同目录
+# 端到端生成「股价创52周新低」HTML 日报（A股 + 美股 双 tab）：
+#   1) 调用 westock-tool 拉取 A股 / 美股 最新收盘数据（主口径：收盘价距 52周最低 ≤ 5%）
+#   2) 生成带 A股/美股 切换 tab 的可交互 HTML 报告到本脚本同目录
 # 用法：python3 generate_52week_low.py
-import json, datetime, os, subprocess, sys, re
+import json, datetime, os, subprocess, sys, re, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "data")
-RAW_NEAR = os.path.join(DATA, "near_raw.json")   # 收盘接近≤5%：ClosePrice <= Week52Low*1.05
-SNAP     = os.path.join(DATA, "snapshot.json")   # 给本地服务用的 JSON 快照
-OUT = os.path.join(HERE, "股价创52周新低_A股列表.html")
-OUT_INDEX = os.path.join(HERE, "index.html")  # 供 Vercel / 静态托管使用的默认入口页
+RAW_A  = os.path.join(DATA, "near_a_raw.json")   # A股：收盘接近≤5%
+RAW_US = os.path.join(DATA, "near_us_raw.json")  # 美股：收盘接近≤5%
+RAW_HK = os.path.join(DATA, "near_hk_raw.json")  # 港股：收盘接近≤5%
+SNAP   = os.path.join(DATA, "snapshot.json")     # 给本地服务用的 JSON 快照
+OUT_INDEX = os.path.join(HERE, "index.html")     # 供 Vercel / 静态托管使用的默认入口页
+OUT_CN = os.path.join(HERE, "股价创52周新低.html")  # 中文名入口（中性，含双市场）
 
 # 托管运行时路径（隔离、稳定）
 NODE = "/Users/green/.workbuddy/binaries/node/versions/22.22.2/bin/node"
 WSTOOL_DIR = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-skills/westock-tool/scripts"
 
-def fetch_data():
-    os.makedirs(DATA, exist_ok=True)
-    exprs = {
-        RAW_NEAR: "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.05, TotalMV > 0])",
-    }
-    for outp, expr in exprs.items():
-        # index.js 用相对路径 require，必须 cd 到脚本目录再执行
-        cmd = 'cd "%s" && "%s" index.js filter \'%s\' --raw --limit 5000' % (WSTOOL_DIR, NODE, expr)
-        print("FETCH:", expr)
+# 主口径：收盘价距 52周最低 ≤ 5%
+EXPR = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.05, TotalMV > 0])"
+
+def fetch_one(outp, market):
+    cmd = 'cd "%s" && "%s" index.js filter \'%s\' --raw --limit 6000' % (WSTOOL_DIR, NODE, EXPR)
+    if market:
+        cmd += ' --market %s' % market
+    label = market or "A股"
+    print("FETCH", label, ":", EXPR)
+    # westock-tool 偶发限流会导致返回空数组，故加重试（间隔退避）
+    for attempt in range(1, 4):
         with open(outp, "w") as f:
             r = subprocess.run(cmd, shell=True, stdout=f, stderr=subprocess.PIPE, text=True)
         if r.returncode != 0:
             sys.stderr.write(r.stderr)
-            sys.exit("filter failed: " + expr)
+            sys.exit("filter failed: " + label)
+        try:
+            with open(outp, encoding="utf-8") as f:
+                if json.load(f):
+                    return  # 非空即成功
+        except Exception:
+            pass
+        print("  (空结果，重试 %d/3) " % attempt)
+        time.sleep(3 * attempt)
+    sys.exit("filter returned empty after retries: " + label)
+
+def fetch_data():
+    os.makedirs(DATA, exist_ok=True)
+    fetch_one(RAW_A, None); time.sleep(1)
+    fetch_one(RAW_US, "us"); time.sleep(1)
+    fetch_one(RAW_HK, "hk")
 
 def load(p):
     d = json.load(open(p, encoding="utf-8"))
     rows = d if isinstance(d, list) else (d.get("data") or d.get("list") or d.get("rows") or [])
-    return [r for r in rows if not r.get("name", "").startswith("N")]   # 排除首日新股
+    return rows
 
 def market_of(code):
     if code.startswith("sh"): return "上海"
@@ -50,35 +69,168 @@ def board_of(code):
     if c.startswith("8") or c.startswith("4"): return "北交所"
     return "其他"
 
-def build_dataset():
-    fetch_data()
-    near = load(RAW_NEAR)
+def mcap_of(_mv):
+    # TotalMV 单位可能随数据源变化：值≥1e6 视为「元」需÷1e8，否则视为「亿」直接使用
+    return round(_mv / 1e8, 1) if _mv >= 1e6 else round(_mv, 1)
 
+def strip_code(code):
+    # 仅去除市场前缀（sh/sz/hk/us），保留后续代码/ ticker（美股 ticker 全为字母，不可整体删除）
+    return re.sub(r'^(sh|sz|hk|us)', '', code)
+
+def _has_fields(r, *fields):
+    return all(r.get(f) not in (None, "") for f in fields)
+
+def build_a():
+    near = [r for r in load(RAW_A)
+            if not r.get("name", "").startswith("N")
+            and _has_fields(r, "Week52Low", "ClosePrice", "ChangePCT", "TotalMV")]
     rows = []
     for r in near:
-        market = market_of(r["code"]); board = board_of(r["code"])
         low = float(r["Week52Low"]); cp = float(r["ClosePrice"])
         dist = round((cp - low) / low * 100, 2) if low else 0.0
-        # TotalMV 单位可能随数据源变化：值≥1e6 视为「元」需÷1e8，否则视为「亿元」直接使用
-        _mv = float(r["TotalMV"])
-        mcap = round(_mv / 1e8, 1) if _mv >= 1e6 else round(_mv, 1)
         rows.append({
-            "code": re.sub(r'^[a-zA-Z]+', '', r["code"]), "name": r["name"],
+            "code": strip_code(r["code"]), "name": r["name"],
             "cp": cp, "chg": float(r["ChangePCT"]),
-            "low": low, "dist": dist, "mcap": mcap,
-            "market": market, "board": board,
+            "low": low, "dist": dist, "mcap": mcap_of(float(r["TotalMV"])),
+            "market": market_of(r["code"]), "board": board_of(r["code"]),
         })
     rows.sort(key=lambda x: x["chg"])
-
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    def cnt(pred): return sum(1 for r in rows if pred(r))
+    cnt = lambda p: sum(1 for r in rows if p(r))
     stats = {
+        "now": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "near_n": len(rows),
-        "sh": cnt(lambda r: r["market"] == "上海"),
-        "sz": cnt(lambda r: r["market"] == "深圳"),
-        "kc": cnt(lambda r: r["board"] == "科创板"),
-        "cy": cnt(lambda r: r["board"] == "创业板"),
-        "now": now,
+        "mcap_unit": "亿",
+        "sub": "收盘价距52周最低≤5%即计入（已排除数据缺失及新股）。",
+        "cards": [
+            {"v": len(rows), "k": "全部", "f": "", "v2": ""},
+            {"v": cnt(lambda r: r["market"] == "上海"), "k": "上海市场", "f": "market", "v2": "上海"},
+            {"v": cnt(lambda r: r["market"] == "深圳"), "k": "深圳市场", "f": "market", "v2": "深圳"},
+            {"v": cnt(lambda r: r["board"] == "科创板"), "k": "科创板", "f": "board", "v2": "科创板"},
+            {"v": cnt(lambda r: r["board"] == "创业板"), "k": "创业板", "f": "board", "v2": "创业板"},
+        ],
+    }
+    return rows, stats
+
+def us_board_of_suffix(suffix):
+    # 腾讯 gtimg 美股代码后缀：.OQ/.O=纳斯达克；.N/.A=纽交所(及纽交所美国)；其余归「其他」
+    if suffix in ("OQ", "O"): return "纳斯达克"
+    if suffix in ("N", "A"): return "纽交所"
+    return "其他"
+
+def fetch_us_meta(codes):
+    # codes: ["usAZO", ...]；批量拉腾讯行情，解析交易所与总市值
+    # 注意：westock-tool 的 TotalMV 对美股单位不稳定（部分股票为原始美元、且与真实值偏差巨大），
+    # 故美股总市值统一改用腾讯 gtimg 的市值字段。
+    #   经核对，field[45] 即为「总市值（单位：亿美元）」，与真实值吻合
+    #   （如 GRAB=135.38 亿≈真实$13.5B、KIDZ=0.00861 亿≈真实$0.86M），
+    #   而 field[36]/1e5 系统性偏高数倍（如 GRAB 误为 578 亿），故仅作兜底。
+    meta = {}
+    if not codes:
+        return meta
+    batch = 50
+    for i in range(0, len(codes), batch):
+        chunk = codes[i:i + batch]
+        url = "https://qt.gtimg.cn/q=" + ",".join(chunk)
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"})
+            txt = urllib.request.urlopen(req, timeout=20).read().decode("gbk", "ignore")
+        except Exception as e:
+            sys.stderr.write("fetch_us_meta batch failed: %s\n" % e)
+            time.sleep(0.5)
+            continue
+        for line in txt.strip().split("\n"):
+            if not line.startswith("v_"):
+                continue
+            try:
+                var = line.split("=", 1)[0]            # v_usAZO
+                code = var[2:]                          # usAZO
+                payload = line.split('"', 2)[1]         # 200~汽车地带~AZO.N~...
+                f = payload.split("~")
+                exch = f[2]                             # AZO.N
+                suffix = exch.split(".")[-1].upper() if "." in exch else ""
+                board = us_board_of_suffix(suffix)
+                mcap = None
+                # 主用 field[45]（已是亿美元）
+                if len(f) > 45 and f[45] not in ("", "-"):
+                    try:
+                        mcap = round(float(f[45]), 2)
+                    except Exception:
+                        mcap = None
+                # 兜底：field[36]（千美元 -> 亿美元）；仅当 field[45] 缺失/为 0 时
+                if (mcap is None or mcap == 0) and len(f) > 36 and f[36] not in ("", "-"):
+                    try:
+                        mcap = round(float(f[36]) / 1e5, 2)
+                    except Exception:
+                        mcap = None
+                meta[code] = {"board": board, "mcap": mcap}
+            except Exception:
+                continue
+        time.sleep(0.3)
+    return meta
+
+def build_us():
+    near = [r for r in load(RAW_US) if _has_fields(r, "Week52Low", "ClosePrice", "ChangePCT", "TotalMV")]
+    codes = [r["code"] for r in near]                  # usXXX
+    meta = fetch_us_meta(codes)
+    rows = []
+    for r in near:
+        low = float(r["Week52Low"]); cp = float(r["ClosePrice"])
+        dist = round((cp - low) / low * 100, 2) if low else 0.0
+        m = meta.get(r["code"], {})
+        g_mcap = m.get("mcap")
+        # 优先用腾讯 gtimg 市值（单位稳定）；仅当 gtimg 缺失/为0 时才回退 westock
+        mcap = g_mcap if (g_mcap is not None and g_mcap > 0) else mcap_of(float(r["TotalMV"]))
+        rows.append({
+            "code": strip_code(r["code"]), "name": r["name"],
+            "cp": cp, "chg": float(r["ChangePCT"]),
+            "low": low, "dist": dist, "mcap": mcap,
+            "market": "美股", "board": m.get("board", "其他"),
+        })
+    rows.sort(key=lambda x: x["chg"])
+    cnt = lambda p: sum(1 for r in rows if p(r))
+    stats = {
+        "now": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "near_n": len(rows),
+        "mcap_unit": "亿美元",
+        "sub": "收盘价距52周最低≤5%即计入（已排除数据缺失）。板块按交易所划分。",
+        "cards": [
+            {"v": len(rows), "k": "全部", "f": "", "v2": ""},
+            {"v": cnt(lambda r: r["board"] == "纽交所"), "k": "纽交所", "f": "board", "v2": "纽交所"},
+            {"v": cnt(lambda r: r["board"] == "纳斯达克"), "k": "纳斯达克", "f": "board", "v2": "纳斯达克"},
+        ],
+    }
+    return rows, stats
+
+def hk_board_of(code):
+    # 港交所：8xxxxx 为创业板(GEM)，其余(0xxxxx 等)为主板
+    num = re.sub(r'^hk', '', code)
+    return "创业板" if num.startswith("8") else "主板"
+
+def build_hk():
+    near = [r for r in load(RAW_HK) if _has_fields(r, "Week52Low", "ClosePrice", "ChangePCT", "TotalMV")]
+    rows = []
+    for r in near:
+        low = float(r["Week52Low"]); cp = float(r["ClosePrice"])
+        dist = round((cp - low) / low * 100, 2) if low else 0.0
+        rows.append({
+            "code": strip_code(r["code"]), "name": r["name"],
+            "cp": cp, "chg": float(r["ChangePCT"]),
+            "low": low, "dist": dist, "mcap": mcap_of(float(r["TotalMV"])),
+            "market": "港股", "board": hk_board_of(r["code"]),
+        })
+    rows.sort(key=lambda x: x["chg"])
+    cnt = lambda p: sum(1 for r in rows if p(r))
+    stats = {
+        "now": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "near_n": len(rows),
+        "mcap_unit": "亿港元",
+        "sub": "收盘价距52周最低≤5%即计入（已排除数据缺失）。板块按港交所划分。",
+        "cards": [
+            {"v": len(rows), "k": "全部", "f": "", "v2": ""},
+            {"v": cnt(lambda r: r["board"] == "主板"), "k": "主板", "f": "board", "v2": "主板"},
+            {"v": cnt(lambda r: r["board"] == "创业板"), "k": "创业板", "f": "board", "v2": "创业板"},
+        ],
     }
     return rows, stats
 
@@ -87,11 +239,11 @@ TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>A股股价创52周新低 公司列表</title>
+<title>股价创52周新低 公司列表（A股 / 美股）</title>
 <style>
   :root {
     --bg:#f5f7fa; --card:#fff; --line:#e6e9ef; --text:#1f2733; --muted:#7a869a;
-    --red:#d8262c; --green:#15915a; --accent:#2f6fed;
+    --red:#d8262c; --green:#15915a; --accent:#2f6fed; --brand:#c0392b;
   }
   * { box-sizing:border-box; }
   body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;
@@ -99,6 +251,12 @@ TEMPLATE = r"""<!DOCTYPE html>
   .wrap { max-width:1120px; margin:0 auto; padding:24px 18px 60px; }
   h1 { font-size:22px; margin:0 0 4px; }
   .sub { color:var(--muted); font-size:13px; line-height:1.6; margin-bottom:10px; }
+  .tabs { display:flex; gap:8px; margin:4px 0 14px; }
+  .tab { background:var(--card); border:1px solid var(--line); border-radius:9px;
+         padding:8px 22px; font-size:14px; font-weight:600; cursor:pointer;
+         color:var(--muted); transition:.15s; user-select:none; }
+  .tab:hover { border-color:var(--accent); color:var(--accent); }
+  .tab.active { background:var(--accent); border-color:var(--accent); color:#fff; }
   .cards { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:4px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:9px;
            padding:8px 14px; min-width:92px; flex:1; cursor:pointer; transition:.15s; user-select:none; }
@@ -115,6 +273,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   th { background:#fafbfc; color:var(--muted); font-weight:600; cursor:pointer; user-select:none; position:sticky; top:0; z-index:1; }
   td.idx, th.idx { position:sticky; left:0; z-index:2; background:var(--card); }
   td.name, th.name { position:sticky; left:40px; z-index:2; background:var(--card); }
+  #t.us-mode th.name, #t.us-mode td.name { max-width:8ch; overflow:hidden; text-overflow:ellipsis; }
   th.idx, th.name { background:#fafbfc; z-index:3; }
   tbody tr:hover td.idx, tbody tr:hover td.name { background:#f3f7ff; }
   th:hover { color:var(--accent); }
@@ -128,12 +287,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   .note { color:var(--muted); font-size:12px; margin-top:16px; line-height:1.8; }
   .tag { display:inline-block; background:#eef3ff; color:var(--accent); border-radius:6px;
           padding:1px 7px; font-size:12px; margin-right:4px; }
-  th.sorted::after { content:" ↕"; color:var(--accent); }
+  th.sort-asc::after { content:" ▲"; font-size:10px; color:var(--brand); }
+  th.sort-desc::after { content:" ▼"; font-size:10px; color:var(--brand); }
   #empty { display:none; padding:34px 12px; text-align:center; color:var(--muted); font-size:14px; line-height:1.9; }
   @media (max-width:640px) {
     .wrap { padding:14px 11px 48px; }
     h1 { font-size:18px; margin-bottom:2px; }
     .sub { font-size:12px; line-height:1.4; margin-bottom:8px; }
+    .tabs { gap:6px; } .tab { flex:1; text-align:center; padding:8px 6px; }
     .cards { display:grid; grid-template-columns:repeat(5,1fr); gap:4px; margin-bottom:4px; }
     .card { min-width:0; flex:none; padding:6px 2px; border-radius:8px; text-align:center; }
     .card .v { font-size:15px; }
@@ -152,8 +313,14 @@ TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 <div class="wrap">
-  <h1>A股股价创52周新低 · 公司列表</h1>
-  <div class="sub">收盘价距52周最低≤5%即计入（已排除数据缺失及新股）。更新：<span id="genTime">__NOW__</span> · 腾讯自选股（仅供参考）</div>
+  <h1>股价创52周新低 · 公司列表</h1>
+  <div class="sub" id="sub"></div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="a" onclick="loadTab('a')">A股</div>
+    <div class="tab" data-tab="hk" onclick="loadTab('hk')">港股</div>
+    <div class="tab" data-tab="us" onclick="loadTab('us')">美股</div>
+  </div>
 
   <div class="cards" id="cards"></div>
   <div class="hint" id="hint"></div>
@@ -161,14 +328,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   <div class="table-scroll">
   <table id="t">
     <thead><tr>
-      <th onclick="sortCol(0,false)">#</th>
+      <th onclick="sortCol(0,false)">序号</th>
       <th onclick="sortCol(1,true)">代码</th>
       <th onclick="sortCol(2,true)">名称</th>
       <th class="num" onclick="sortCol(3,false)">最新价</th>
       <th class="num" onclick="sortCol(4,false)">涨跌幅</th>
       <th class="num" onclick="sortCol(5,false)">52周最低</th>
       <th class="num" onclick="sortCol(6,false)">距52周低点</th>
-      <th class="num" onclick="sortCol(7,false)">总市值(亿)</th>
+      <th class="num" id="mcapHead" onclick="sortCol(7,false)">总市值(亿)</th>
       <th onclick="sortCol(8,true)">板块</th>
     </tr></thead>
     <tbody id="tbody"></tbody>
@@ -180,26 +347,44 @@ TEMPLATE = r"""<!DOCTYPE html>
     <span class="tag">口径</span>
     “收盘价距52周最低 ≤ 5%”：收盘收在历史最低上方 5% 以内（含等于或低于）即计入，当前共 <b id="noteNear">__NEAR__</b> 只。<br>
     <span class="tag">说明</span>
-    "距52周低点" = (最新价 − 52周最低) / 52周最低；"总市值"单位为亿元。点击模块卡片可一键筛选；点击任意表头可按该列升降序排序。<br>
+    "距52周低点" = (最新价 − 52周最低) / 52周最低；"总市值"单位为<span id="mcapUnit">亿</span>。点击模块卡片可一键筛选；点击任意表头可按该列升降序排序。<br>
     本报告仅作客观数据筛选与展示，不构成任何投资建议。市场有风险，决策需谨慎。
   </div>
 </div>
 
 <script>
-var DATA = __DATA__;
-var STATS = __STATS__;
-var moduleField = "", moduleVal = "";
+var TABS = {
+  a:  { label:"A股", data: __DATA_A__,  stats: __STATS_A__ },
+  us: { label:"美股", data: __DATA_US__, stats: __STATS_US__ },
+  hk: { label:"港股", data: __DATA_HK__, stats: __STATS_HK__ }
+};
+var CUR = "a";
+var DATA, STATS, moduleField = "", moduleVal = "";
 
 function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function fmtMcap(v){
+  // 大市值取整；小市值(美股微型股)保留小数，避免显示为 0
+  if(v >= 100) return String(Math.round(v));
+  if(v >= 1) return v.toFixed(1);
+  return v.toFixed(2);
+}
+
+function loadTab(id){
+  CUR = id;
+  var t = TABS[id];
+  DATA = t.data; STATS = t.stats;
+  moduleField = ""; moduleVal = "";
+  document.getElementById('sub').textContent = STATS.sub + "更新：" + STATS.now + " · 腾讯自选股（仅供参考）";
+  document.getElementById('noteNear').textContent = STATS.near_n;
+  document.getElementById('mcapHead').textContent = "总市值(" + STATS.mcap_unit + ")";
+  document.getElementById('mcapUnit').textContent = STATS.mcap_unit;
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===id));
+  document.getElementById('t').classList.toggle('us-mode', id==='us');
+  buildCards(); buildRows(); render();
+}
 
 function buildCards(){
-  var cards = [
-    {v:STATS.near_n, k:"全部", f:"", v2:""},
-    {v:STATS.sh, k:"上海市场", f:"market", v2:"上海"},
-    {v:STATS.sz, k:"深圳市场", f:"market", v2:"深圳"},
-    {v:STATS.kc, k:"科创板", f:"board", v2:"科创板"},
-    {v:STATS.cy, k:"创业板", f:"board", v2:"创业板"},
-  ];
+  var cards = STATS.cards;
   document.getElementById('cards').innerHTML = cards.map(function(c){
     return '<div class="card" data-f="'+c.f+'" data-v="'+c.v2+'" onclick="pickModule(this)">'+
            '<div class="v">'+c.v+'</div><div class="k">'+c.k+'</div></div>';
@@ -229,11 +414,11 @@ function buildRows(){
       '<td class="num '+cls+'">'+sign+chg.toFixed(2)+'%</td>'+
       '<td class="num">'+r.low.toFixed(2)+'</td>'+
       '<td class="num">'+r.dist.toFixed(2)+'%</td>'+
-      '<td class="num">'+Math.round(r.mcap)+'</td>'+
+      '<td class="num">'+fmtMcap(r.mcap)+'</td>'+
       '<td>'+esc(r.board)+'</td></tr>';
   }).join('');
   lastCol=-1; lastDir='desc';
-  document.querySelectorAll('#t th').forEach(th=>th.classList.remove('sorted'));
+  document.querySelectorAll('#t th').forEach(th=>th.classList.remove('sort-asc','sort-desc'));
 }
 function render(){
   var vis = 0;
@@ -267,45 +452,65 @@ function doSort(i,isStr,dir){
   var k=0;
   trs.forEach(tr=>{ if(tr.style.display!=="none") tr.children[0].innerText=++k; });
   lastCol=i; lastDir=dir;
-  document.querySelectorAll('#t th').forEach(th=>th.classList.remove('sorted'));
-  document.querySelectorAll('#t th')[i].classList.add('sorted');
+  document.querySelectorAll('#t th').forEach(th=>th.classList.remove('sort-asc','sort-desc'));
+  var thEl=document.querySelectorAll('#t th')[i];
+  thEl.classList.toggle('sort-asc', dir==='asc');
+  thEl.classList.toggle('sort-desc', dir==='desc');
 }
 // 初始化
-document.getElementById('genTime').textContent=STATS.now;
-document.getElementById('noteNear').textContent=STATS.near_n;
-buildCards(); buildRows(); render();
+loadTab('a');
 </script>
 </body>
 </html>
 """
 
-def render_html(rows, stats):
-    data_json = json.dumps(rows, ensure_ascii=False)
-    stats_json = json.dumps(stats, ensure_ascii=False)
+def render_html(a_rows, a_stats, us_rows, us_stats, hk_rows, hk_stats):
+    a_data = json.dumps(a_rows, ensure_ascii=False)
+    a_stats_j = json.dumps(a_stats, ensure_ascii=False)
+    us_data = json.dumps(us_rows, ensure_ascii=False)
+    us_stats_j = json.dumps(us_stats, ensure_ascii=False)
+    hk_data = json.dumps(hk_rows, ensure_ascii=False)
+    hk_stats_j = json.dumps(hk_stats, ensure_ascii=False)
     return (TEMPLATE
-            .replace("__DATA__", data_json)
-            .replace("__STATS__", stats_json)
-            .replace("__NOW__", stats["now"])
-            .replace("__NEAR__", str(stats["near_n"])))
+            .replace("__DATA_A__", a_data)
+            .replace("__STATS_A__", a_stats_j)
+            .replace("__DATA_US__", us_data)
+            .replace("__STATS_US__", us_stats_j)
+            .replace("__DATA_HK__", hk_data)
+            .replace("__STATS_HK__", hk_stats_j))
 
-def write_html(rows, stats):
+def write_html(a_rows, a_stats, us_rows, us_stats, hk_rows, hk_stats):
     os.makedirs(HERE, exist_ok=True)
-    html = render_html(rows, stats)
-    with open(OUT, "w", encoding="utf-8") as f:
-        f.write(html)
+    html = render_html(a_rows, a_stats, us_rows, us_stats, hk_rows, hk_stats)
     with open(OUT_INDEX, "w", encoding="utf-8") as f:
         f.write(html)
+    with open(OUT_CN, "w", encoding="utf-8") as f:
+        f.write(html)
     with open(SNAP, "w", encoding="utf-8") as f:
-        json.dump({"rows": rows, "stats": stats}, f, ensure_ascii=False)
+        json.dump({"a": {"rows": a_rows, "stats": a_stats},
+                   "us": {"rows": us_rows, "stats": us_stats},
+                   "hk": {"rows": hk_rows, "stats": hk_stats}}, f, ensure_ascii=False)
 
 def main():
-    rows, stats = build_dataset()
-    write_html(rows, stats)
-    print("WROTE", OUT)
+    fetch_data()
+    a_rows, a_stats = build_a()
+    us_rows, us_stats = build_us()
+    hk_rows, hk_stats = build_hk()
+    write_html(a_rows, a_stats, us_rows, us_stats, hk_rows, hk_stats)
     print("WROTE", OUT_INDEX)
-    print("主口径(收盘距52周最低≤5%)=", stats["near_n"],
-          "| 上海=", stats["sh"], "深圳=", stats["sz"],
-          "科创=", stats["kc"], "创业=", stats["cy"])
+    print("WROTE", OUT_CN)
+    print("A股 主口径(收盘距52周最低≤5%)=", a_stats["near_n"],
+          "| 上海=", sum(1 for r in a_rows if r["market"]=="上海"),
+          "深圳=", sum(1 for r in a_rows if r["market"]=="深圳"),
+          "科创=", sum(1 for r in a_rows if r["board"]=="科创板"),
+          "创业=", sum(1 for r in a_rows if r["board"]=="创业板"))
+    print("美股 主口径(收盘距52周最低≤5%)=", us_stats["near_n"],
+          "| 纽交所=", sum(1 for r in us_rows if r["board"]=="纽交所"),
+          "纳斯达克=", sum(1 for r in us_rows if r["board"]=="纳斯达克"),
+          "其他=", sum(1 for r in us_rows if r["board"]=="其他"))
+    print("港股 主口径(收盘距52周最低≤5%)=", hk_stats["near_n"],
+          "| 主板=", sum(1 for r in hk_rows if r["board"]=="主板"),
+          "创业板=", sum(1 for r in hk_rows if r["board"]=="创业板"))
 
 if __name__ == "__main__":
     main()
