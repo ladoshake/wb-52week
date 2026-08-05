@@ -21,9 +21,14 @@ WSTOOL_DIR = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/r
 
 # 主口径：收盘价距 52周最低 ≤ 5%
 EXPR = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.05, TotalMV > 0])"
+# A股专用粗筛：westock 的 Week52Low 对 A股数据质量异常(偏高/钳制)，故粗筛放宽到 ≤20%，
+# 真实 52周最低改由 gtimg f[48] 校正后再精确筛 ≤5%（见 2026-08-05 诊断）。
+# 说明：westock WL 偏高会使真实接近新低的股票 ratio 更小，必落在 ≤1.20 粗筛内，不会漏。
+EXPR_A = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.20, TotalMV > 0])"
 
 def fetch_one(outp, market):
-    cmd = 'cd "%s" && "%s" index.js filter \'%s\' --raw --limit 6000' % (WSTOOL_DIR, NODE, EXPR)
+    expr = EXPR_A if market in (None, "hs") else EXPR
+    cmd = 'cd "%s" && "%s" index.js filter \'%s\' --raw --limit 6000' % (WSTOOL_DIR, NODE, expr)
     if market:
         cmd += ' --market %s' % market
     label = market or "A股"
@@ -47,7 +52,7 @@ def fetch_one(outp, market):
 
 def fetch_data():
     os.makedirs(DATA, exist_ok=True)
-    fetch_one(RAW_A, None); time.sleep(1)
+    fetch_one(RAW_A, "hs"); time.sleep(1)
     fetch_one(RAW_US, "us"); time.sleep(1)
     fetch_one(RAW_HK, "hk")
 
@@ -81,17 +86,33 @@ def _has_fields(r, *fields):
     return all(r.get(f) not in (None, "") for f in fields)
 
 def build_a():
+    # 粗筛候选池(westock 用放宽的 1.20 阈值)，真实 Week52Low 由 gtimg f[48] 校正后精确筛 ≤5%
     near = [r for r in load(RAW_A)
             if not r.get("name", "").startswith("N")
-            and _has_fields(r, "Week52Low", "ClosePrice", "ChangePCT", "TotalMV")]
+            and _has_fields(r, "ClosePrice", "ChangePCT", "TotalMV")]
+    codes = [r["code"] for r in near]
+    meta = fetch_a_meta(codes)
     rows = []
     for r in near:
-        low = float(r["Week52Low"]); cp = float(r["ClosePrice"])
-        dist = round((cp - low) / low * 100, 2) if low else 0.0
+        cp = float(r["ClosePrice"])
+        m = meta.get(r["code"], {})
+        wl = m.get("wl")
+        # 兜底：gtimg 缺失时用 westock 的 Week52Low
+        if wl is None or wl <= 0:
+            try:
+                v = float(r.get("Week52Low", 0) or 0)
+                wl = v if v > 0 else None
+            except Exception:
+                wl = None
+        if wl is None or wl <= 0:
+            continue
+        dist = round((cp - wl) / wl * 100, 2)
+        if dist > 5:
+            continue
         rows.append({
             "code": strip_code(r["code"]), "name": r["name"],
             "cp": cp, "chg": float(r["ChangePCT"]),
-            "low": low, "dist": dist, "mcap": mcap_of(float(r["TotalMV"])),
+            "low": wl, "dist": dist, "mcap": mcap_of(float(r["TotalMV"])),
             "market": market_of(r["code"]), "board": board_of(r["code"]),
         })
     rows.sort(key=lambda x: x["chg"])
@@ -164,6 +185,44 @@ def fetch_us_meta(codes):
                     except Exception:
                         mcap = None
                 meta[code] = {"board": board, "mcap": mcap}
+            except Exception:
+                continue
+        time.sleep(0.3)
+    return meta
+
+def fetch_a_meta(codes):
+    # A股 52周最低价改用腾讯 gtimg 校正（westock 的 Week52Low 对 A股数据质量异常/偏高，见 2026-08-05 诊断）
+    # gtimg A股字段：f[3]=现价, f[47]=52周最高, f[48]=52周最低(权威值)
+    meta = {}
+    if not codes:
+        return meta
+    batch = 50
+    for i in range(0, len(codes), batch):
+        chunk = codes[i:i + batch]
+        url = "https://qt.gtimg.cn/q=" + ",".join(chunk)
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"})
+            txt = urllib.request.urlopen(req, timeout=20).read().decode("gbk", "ignore")
+        except Exception as e:
+            sys.stderr.write("fetch_a_meta batch failed: %s\n" % e)
+            time.sleep(0.5)
+            continue
+        for line in txt.strip().split("\n"):
+            if not line.startswith("v_"):
+                continue
+            try:
+                var = line.split("=", 1)[0]            # v_sh600363
+                code = var[2:]                          # sh600363
+                payload = line.split('"', 2)[1]
+                f = payload.split("~")
+                wl = None
+                if len(f) > 48 and f[48] not in ("", "-"):
+                    try:
+                        wl = float(f[48])
+                    except Exception:
+                        wl = None
+                meta[code] = {"wl": wl}
             except Exception:
                 continue
         time.sleep(0.3)
