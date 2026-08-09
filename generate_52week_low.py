@@ -172,16 +172,20 @@ def fetch_us_meta(codes):
                 suffix = exch.split(".")[-1].upper() if "." in exch else ""
                 board = us_board_of_suffix(suffix)
                 mcap = None
-                # 主用 field[45]（已是亿美元）
+                # 主用 field[45]（已是亿美元）。保留足够小数位：
+                # 微型股(如 OTC 股 ZYLMD=0.00115 亿)若四舍五入到2位会被舍成 0，
+                # 进而误触发下面 field[36] 兜底造成市值虚高数十倍，故此处保留4位小数。
                 if len(f) > 45 and f[45] not in ("", "-"):
                     try:
-                        mcap = round(float(f[45]), 2)
+                        v = float(f[45])
+                        mcap = round(v, 4) if v > 0 else 0.0
                     except Exception:
                         mcap = None
-                # 兜底：field[36]（千美元 -> 亿美元）；仅当 field[45] 缺失/为 0 时
-                if (mcap is None or mcap == 0) and len(f) > 36 and f[36] not in ("", "-"):
+                # 兜底：仅当 field[45] 完全缺失/非法时才用 field[36]（千美元 -> 亿美元）估算；
+                # 注意 field[36]/1e5 对多数股票系统性偏高，不可作为常规口径。
+                if mcap is None and len(f) > 36 and f[36] not in ("", "-"):
                     try:
-                        mcap = round(float(f[36]) / 1e5, 2)
+                        mcap = round(float(f[36]) / 1e5, 4)
                     except Exception:
                         mcap = None
                 meta[code] = {"board": board, "mcap": mcap}
@@ -238,8 +242,8 @@ def build_us():
         dist = round((cp - low) / low * 100, 2) if low else 0.0
         m = meta.get(r["code"], {})
         g_mcap = m.get("mcap")
-        # 优先用腾讯 gtimg 市值（单位稳定）；仅当 gtimg 缺失/为0 时才回退 westock
-        mcap = g_mcap if (g_mcap is not None and g_mcap > 0) else mcap_of(float(r["TotalMV"]))
+        # 优先用腾讯 gtimg 市值（单位稳定）；仅当 gtimg 完全缺失时才回退 westock（美股 TotalMV 不可靠）
+        mcap = g_mcap if g_mcap is not None else mcap_of(float(r["TotalMV"]))
         rows.append({
             "code": strip_code(r["code"]), "name": r["name"],
             "cp": cp, "chg": float(r["ChangePCT"]),
@@ -422,10 +426,11 @@ var DATA, STATS, moduleField = "", moduleVal = "";
 
 function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function fmtMcap(v){
-  // 大市值取整；小市值(美股微型股)保留小数，避免显示为 0
+  // 大市值取整；小市值保留小数；微型股(如 OTC 股 0.0012 亿)保留4位，避免显示为 0
   if(v >= 100) return String(Math.round(v));
   if(v >= 1) return v.toFixed(1);
-  return v.toFixed(2);
+  if(v >= 0.01) return v.toFixed(2);
+  return v.toFixed(4);
 }
 
 function loadTab(id){
