@@ -26,29 +26,127 @@ EXPR = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.05, TotalMV > 0])"
 # 说明：westock WL 偏高会使真实接近新低的股票 ratio 更小，必落在 ≤1.20 粗筛内，不会漏。
 EXPR_A = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.20, TotalMV > 0])"
 
+# 52周最低价在 gtimg 中的字段索引（不同市场不同）
+# A股: f[48]=52周最低; 美股/港股: f[49]=52周最低
+WL_IDX_A = 48
+WL_IDX_US = 49
+WL_IDX_HK = 49
+
+def _gen_a_codes():
+    """生成所有可能的 A 股代码（沪市主板 + 科创板 + 深市主板 + 创业板）"""
+    codes = []
+    # 沪市主板: 600000-605999
+    for n in range(600000, 606000):
+        codes.append("sh%06d" % n)
+    # 科创板: 688000-689999
+    for n in range(688000, 690000):
+        codes.append("sh%06d" % n)
+    # 深市主板: 000001-003999
+    for n in range(1, 4000):
+        codes.append("sz%06d" % n)
+    # 创业板: 300001-301999
+    for n in range(300001, 302000):
+        codes.append("sz%06d" % n)
+    return codes
+
+def _get_codes_from_file(path):
+    """从旧数据文件中提取股票代码列表"""
+    try:
+        d = json.load(open(path, encoding="utf-8"))
+        rows = d if isinstance(d, list) else (d.get("data") or d.get("list") or d.get("rows") or [])
+        return [r["code"] for r in rows if r.get("code")]
+    except Exception:
+        return []
+
 def fetch_one(outp, market):
-    expr = EXPR_A if market in (None, "hs") else EXPR
-    cmd = 'cd "%s" && "%s" index.js filter \'%s\' --raw --limit 6000' % (WSTOOL_DIR, NODE, expr)
-    if market:
-        cmd += ' --market %s' % market
+    """通过 gtimg API 批量获取股票数据（替代已失效的 westock-tool CLI）"""
     label = market or "A股"
-    print("FETCH", label, ":", EXPR)
-    # westock-tool 偶发限流会导致返回空数组，故加重试（间隔退避）
+    print("FETCH", label, "via gtimg API")
+
+    # 获取候选股票代码池
+    if market in (None, "hs"):
+        # A股: 生成全量代码（沪市主板+科创+深市主板+创业），确保不遗漏新进入52周低点区域的股票
+        codes = _gen_a_codes()
+        wl_idx = WL_IDX_A
+        mv_idx = 44  # A股总市值(亿元)
+        print("  候选池:", len(codes), "个 A股代码 (全量生成)")
+    elif market == "us":
+        codes = _get_codes_from_file(RAW_US)
+        wl_idx = WL_IDX_US
+        mv_idx = 45  # 美股总市值(亿美元)
+        print("  候选池:", len(codes), "个美股代码 (from near_us_raw.json)")
+    elif market == "hk":
+        codes = _get_codes_from_file(RAW_HK)
+        wl_idx = WL_IDX_HK
+        mv_idx = 44  # 港股总市值(亿港元)
+        print("  候选池:", len(codes), "个港股代码 (from near_hk_raw.json)")
+    else:
+        codes = []
+        wl_idx = WL_IDX_A
+        mv_idx = 44
+
+    if not codes:
+        print("  警告: 候选池为空，写入空数组")
+        with open(outp, "w", encoding="utf-8") as f:
+            json.dump([], f)
+        return
+
+    # 批量查询 gtimg 行情（每批50个）
+    records = []
+    batch = 50
     for attempt in range(1, 4):
-        with open(outp, "w") as f:
-            r = subprocess.run(cmd, shell=True, stdout=f, stderr=subprocess.PIPE, text=True)
-        if r.returncode != 0:
-            sys.stderr.write(r.stderr)
-            sys.exit("filter failed: " + label)
-        try:
-            with open(outp, encoding="utf-8") as f:
-                if json.load(f):
-                    return  # 非空即成功
-        except Exception:
-            pass
+        records = []
+        for i in range(0, len(codes), batch):
+            chunk = codes[i:i + batch]
+            url = "https://qt.gtimg.cn/q=" + ",".join(chunk)
+            try:
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"})
+                txt = urllib.request.urlopen(req, timeout=20).read().decode("gbk", "ignore")
+            except Exception as e:
+                sys.stderr.write("  gtimg batch %d failed: %s\n" % (i // batch, e))
+                time.sleep(0.5)
+                continue
+            for line in txt.strip().split("\n"):
+                if not line.startswith("v_"):
+                    continue
+                try:
+                    var = line.split("=", 1)[0]
+                    code = var[2:]
+                    payload = line.split('"', 2)[1]
+                    f = payload.split("~")
+                    if len(f) <= max(wl_idx, mv_idx, 3, 32):
+                        continue
+                    cp_str = f[3]
+                    wl_str = f[wl_idx]
+                    if cp_str in ("", "-") or wl_str in ("", "-"):
+                        continue
+                    cp = float(cp_str)
+                    wl = float(wl_str)
+                    if cp <= 0 or wl <= 0:
+                        continue
+                    chg_str = f[32] if len(f) > 32 and f[32] not in ("", "-") else "0"
+                    mv_str = f[mv_idx] if len(f) > mv_idx and f[mv_idx] not in ("", "-") else "0"
+                    records.append({
+                        "code": code,
+                        "name": f[1],
+                        "Week52Low": str(wl),
+                        "LowPrice": str(wl),
+                        "TotalMV": mv_str,
+                        "ClosePrice": str(cp),
+                        "ChangePCT": chg_str,
+                    })
+                except Exception:
+                    continue
+            time.sleep(0.3)
+        if records:
+            break
         print("  (空结果，重试 %d/3) " % attempt)
         time.sleep(3 * attempt)
-    sys.exit("filter returned empty after retries: " + label)
+
+    with open(outp, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False)
+    print("  获取 %d 条记录" % len(records))
 
 def fetch_data():
     os.makedirs(DATA, exist_ok=True)
