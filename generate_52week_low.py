@@ -21,14 +21,15 @@ WSTOOL_DIR = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/r
 
 # 主口径：收盘价距 52周最低 ≤ 5%
 EXPR = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.05, TotalMV > 0])"
-# A股专用粗筛：westock 的 Week52Low 对 A股数据质量异常(偏高/钳制)，故粗筛放宽到 ≤20%，
-# 真实 52周最低改由 gtimg f[48] 校正后再精确筛 ≤5%（见 2026-08-05 诊断）。
-# 说明：westock WL 偏高会使真实接近新低的股票 ratio 更小，必落在 ≤1.20 粗筛内，不会漏。
-EXPR_A = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.20, TotalMV > 0])"
+# A股粗筛：fetch_one 已用 f[68](前复权) 作为 Week52Low，数据正确，
+# 故粗筛可直接用标准 1.05 阈值；build_a 再精确筛 ≤5%。
+EXPR_A = "intersect([LowPrice > 0, ClosePrice <= Week52Low * 1.05, TotalMV > 0])"
 
 # 52周最低价在 gtimg 中的字段索引（不同市场不同）
-# A股: f[48]=52周最低; 美股/港股: f[49]=52周最低
-WL_IDX_A = 48
+# A股: f[68]=52周最低(前复权口径，与行情软件一致);
+#   注意 f[48] 是后复权虚高值(≈现价)，不可用(见 2026-08-20 诊断)。
+# 美股/港股: f[49]=52周最低
+WL_IDX_A = 68
 WL_IDX_US = 49
 WL_IDX_HK = 49
 
@@ -184,25 +185,18 @@ def _has_fields(r, *fields):
     return all(r.get(f) not in (None, "") for f in fields)
 
 def build_a():
-    # 粗筛候选池(westock 用放宽的 1.20 阈值)，真实 Week52Low 由 gtimg f[48] 校正后精确筛 ≤5%
+    # fetch_one 已用 f[68](前复权) 作为 Week52Low，数据正确，无需二次校正。
     near = [r for r in load(RAW_A)
             if not r.get("name", "").startswith("N")
-            and _has_fields(r, "ClosePrice", "ChangePCT", "TotalMV")]
-    codes = [r["code"] for r in near]
-    meta = fetch_a_meta(codes)
+            and _has_fields(r, "ClosePrice", "ChangePCT", "TotalMV", "Week52Low")]
     rows = []
     for r in near:
         cp = float(r["ClosePrice"])
-        m = meta.get(r["code"], {})
-        wl = m.get("wl")
-        # 兜底：gtimg 缺失时用 westock 的 Week52Low
-        if wl is None or wl <= 0:
-            try:
-                v = float(r.get("Week52Low", 0) or 0)
-                wl = v if v > 0 else None
-            except Exception:
-                wl = None
-        if wl is None or wl <= 0:
+        try:
+            wl = float(r.get("Week52Low", 0) or 0)
+        except Exception:
+            continue
+        if wl <= 0:
             continue
         dist = round((cp - wl) / wl * 100, 2)
         if dist > 5:
@@ -293,8 +287,9 @@ def fetch_us_meta(codes):
     return meta
 
 def fetch_a_meta(codes):
-    # A股 52周最低价改用腾讯 gtimg 校正（westock 的 Week52Low 对 A股数据质量异常/偏高，见 2026-08-05 诊断）
-    # gtimg A股字段：f[3]=现价, f[47]=52周最高, f[48]=52周最低(权威值)
+    # A股 52周最低价工具函数（备用，build_a 已直接用 fetch_one 的 f[68] 值，无需二次调用）
+    # gtimg A股字段：f[3]=现价, f[47]=52周最高, f[68]=52周最低(前复权口径，与行情软件一致)
+    # 注意 f[48] 是后复权虚高值(≈现价)，不可用
     meta = {}
     if not codes:
         return meta
@@ -319,9 +314,9 @@ def fetch_a_meta(codes):
                 payload = line.split('"', 2)[1]
                 f = payload.split("~")
                 wl = None
-                if len(f) > 48 and f[48] not in ("", "-"):
+                if len(f) > 68 and f[68] not in ("", "-"):
                     try:
-                        wl = float(f[48])
+                        wl = float(f[68])
                     except Exception:
                         wl = None
                 meta[code] = {"wl": wl}
