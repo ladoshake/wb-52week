@@ -216,8 +216,8 @@ def build_a():
         "sub": "收盘价距52周最低≤5%即计入（已排除数据缺失及新股）。",
         "cards": [
             {"v": len(rows), "k": "全部", "f": "", "v2": ""},
-            {"v": cnt(lambda r: r["market"] == "上海"), "k": "上海市场", "f": "market", "v2": "上海"},
-            {"v": cnt(lambda r: r["market"] == "深圳"), "k": "深圳市场", "f": "market", "v2": "深圳"},
+            {"v": cnt(lambda r: r["board"] == "沪市主板"), "k": "沪市主板", "f": "board", "v2": "沪市主板"},
+            {"v": cnt(lambda r: r["board"] == "深市主板"), "k": "深市主板", "f": "board", "v2": "深市主板"},
             {"v": cnt(lambda r: r["board"] == "科创板"), "k": "科创板", "f": "board", "v2": "科创板"},
             {"v": cnt(lambda r: r["board"] == "创业板"), "k": "创业板", "f": "board", "v2": "创业板"},
         ],
