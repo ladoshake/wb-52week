@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 端到端生成「股价创52周新低」HTML 日报（A股 + 美股 双 tab）：
-#   1) 调用 westock-tool 拉取 A股 / 美股 最新收盘数据（主口径：收盘价距 52周最低 ≤ 5%）
-#   2) 生成带 A股/美股 切换 tab 的可交互 HTML 报告到本脚本同目录
-# 用法：python3 generate_52week_low.py
+# 端到端生成「股价创52周新低」HTML 日报（A股 + 美股 + 港股 三 tab）：
+#   1) A股：本地全量枚举代码 + gtimg 行情（前复权52周低 f[68]）；
+#      美股/港股：universe 代码来自每周自动化任务产出的全市场清单
+#      (cloned_repo/assets/us_stocks.json, hk_stocks.json)，行情经 gtimg 刷新。
+#   2) 主口径：收盘价距52周最低 ≤ 5%；生成带 tab 切换的可交互 HTML 报告到本脚本同目录。
+# 用法：python3 generate_52week_low.py            # 每日：复用已同步的 universe，仅刷新行情
+#       python3 generate_52week_low.py --weekly   # 每周：强制同步 universe 后刷新行情
 import json, datetime, os, subprocess, sys, re, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -12,6 +15,18 @@ RAW_A  = os.path.join(DATA, "near_a_raw.json")   # A股：收盘接近≤5%
 RAW_US = os.path.join(DATA, "near_us_raw.json")  # 美股：收盘接近≤5%
 RAW_HK = os.path.join(DATA, "near_hk_raw.json")  # 港股：收盘接近≤5%
 SNAP   = os.path.join(DATA, "snapshot.json")     # 给本地服务用的 JSON 快照
+
+# 全市场代码清单（来自每周自动化任务 "每周更新股票基金JSON列表数据"，每周日16:00 写入）
+# 美股/港股候选池冻结根因：8-17 westock-tool 被删除后不再生成 universe，
+# near_us_raw.json/near_hk_raw.json 停留在 8-17 快照。改用下列清单解冻候选池。
+# 可用环境变量 UNIVERSE_DIR 覆盖 cloned_repo 路径（默认指向该自动化任务的 cloned_repo/assets）。
+UNIVERSE_DIR = os.environ.get("UNIVERSE_DIR",
+    "/Users/green/WorkBuddy/2026-07-28-10-26-17/cloned_repo/assets")
+US_UNIVERSE_JSON = os.path.join(UNIVERSE_DIR, "us_stocks.json")   # 美股全量清单
+HK_UNIVERSE_JSON = os.path.join(UNIVERSE_DIR, "hk_stocks.json")  # 港股全量清单
+# 每周同步后的 universe 代码（gtimg 格式 usXXX / hkXXXXX），每日刷新行情时读取，避免每日重扫全市场
+US_CODES = os.path.join(DATA, "us_codes.json")
+HK_CODES = os.path.join(DATA, "hk_codes.json")
 OUT_INDEX = os.path.join(HERE, "index.html")     # 供 Vercel / 静态托管使用的默认入口页
 OUT_CN = os.path.join(HERE, "股价创52周新低.html")  # 中文名入口（中性，含双市场）
 
@@ -59,6 +74,59 @@ def _get_codes_from_file(path):
     except Exception:
         return []
 
+def _sync_universe():
+    """从每周更新的全市场清单 (cloned_repo/assets/us_stocks.json, hk_stocks.json)
+    同步美股/港股 universe 代码（转 gtimg 格式），写入 data/us_codes.json / hk_codes.json。
+    冻结根因：8-17 westock-tool 被删除后不再生成 universe，near_us_raw.json/near_hk_raw.json
+    停留在 8-17 快照；改用此清单解冻。若清单缺失则回退到现有 near_*_raw.json 代码。"""
+    # 美股：裸 ticker -> us+ticker（含 .B 等后缀，gtimg 直接识别）
+    us_codes = []
+    try:
+        d = json.load(open(US_UNIVERSE_JSON, encoding="utf-8"))
+        for r in d:
+            c = (r.get("code") or "").strip()
+            if c:
+                us_codes.append("us" + c)
+    except Exception as e:
+        sys.stderr.write("读 %s 失败: %s，回退 near_us_raw.json\n" % (US_UNIVERSE_JSON, e))
+        us_codes = _get_codes_from_file(RAW_US)
+    # 港股：5位裸代码 -> hk+补零到5位
+    hk_codes = []
+    try:
+        d = json.load(open(HK_UNIVERSE_JSON, encoding="utf-8"))
+        for r in d:
+            c = (r.get("code") or "").strip()
+            if c:
+                hk_codes.append("hk" + c.zfill(5))
+    except Exception as e:
+        sys.stderr.write("读 %s 失败: %s，回退 near_hk_raw.json\n" % (HK_UNIVERSE_JSON, e))
+        hk_codes = _get_codes_from_file(RAW_HK)
+    us_codes = list(dict.fromkeys(us_codes))   # 去重保序
+    hk_codes = list(dict.fromkeys(hk_codes))
+    json.dump(us_codes, open(US_CODES, "w", encoding="utf-8"))
+    json.dump(hk_codes, open(HK_CODES, "w", encoding="utf-8"))
+    print("UNIVERSE 同步: 美股 %d 个, 港股 %d 个 -> %s" % (len(us_codes), len(hk_codes), DATA))
+    return us_codes, hk_codes
+
+def _ensure_codes(market):
+    """返回美股/港股 universe 代码（gtimg 格式）。
+    每周自动从 cloned_repo 清单同步（其 mtime 更新即重同步），每日若清单未更新则直接复用
+    本地 codes 文件（仅刷新行情），从而实现「每周同步一次 universe、每日只刷新行情」。"""
+    codes_path = US_CODES if market == "us" else HK_CODES
+    src_path = US_UNIVERSE_JSON if market == "us" else HK_UNIVERSE_JSON
+    need = True
+    if os.path.exists(codes_path):
+        if os.path.exists(src_path):
+            need = os.path.getmtime(src_path) > os.path.getmtime(codes_path)
+        else:
+            need = False   # 源缺失，保留上次同步结果，不破坏每日运行
+    if need:
+        _sync_universe()
+    try:
+        return json.load(open(codes_path, encoding="utf-8"))
+    except Exception:
+        return _get_codes_from_file(RAW_US if market == "us" else RAW_HK)
+
 def fetch_one(outp, market):
     """通过 gtimg API 批量获取股票数据（替代已失效的 westock-tool CLI）"""
     label = market or "A股"
@@ -72,15 +140,15 @@ def fetch_one(outp, market):
         mv_idx = 44  # A股总市值(亿元)
         print("  候选池:", len(codes), "个 A股代码 (全量生成)")
     elif market == "us":
-        codes = _get_codes_from_file(RAW_US)
+        codes = _ensure_codes("us")
         wl_idx = WL_IDX_US
         mv_idx = 45  # 美股总市值(亿美元)
-        print("  候选池:", len(codes), "个美股代码 (from near_us_raw.json)")
+        print("  候选池:", len(codes), "个美股代码 (from universe %s)" % os.path.basename(US_CODES))
     elif market == "hk":
-        codes = _get_codes_from_file(RAW_HK)
+        codes = _ensure_codes("hk")
         wl_idx = WL_IDX_HK
         mv_idx = 44  # 港股总市值(亿港元)
-        print("  候选池:", len(codes), "个港股代码 (from near_hk_raw.json)")
+        print("  候选池:", len(codes), "个港股代码 (from universe %s)" % os.path.basename(HK_CODES))
     else:
         codes = []
         wl_idx = WL_IDX_A
@@ -149,8 +217,10 @@ def fetch_one(outp, market):
         json.dump(records, f, ensure_ascii=False)
     print("  获取 %d 条记录" % len(records))
 
-def fetch_data():
+def fetch_data(force_sync=False):
     os.makedirs(DATA, exist_ok=True)
+    if force_sync:
+        _sync_universe()   # 每周强制同步 universe（cloned_repo 清单已更新）
     fetch_one(RAW_A, "hs"); time.sleep(1)
     fetch_one(RAW_US, "us"); time.sleep(1)
     fetch_one(RAW_HK, "hk")
@@ -836,8 +906,8 @@ def write_html(a_rows, a_stats, us_rows, us_stats, hk_rows, hk_stats):
                    "us": {"rows": us_rows, "stats": us_stats},
                    "hk": {"rows": hk_rows, "stats": hk_stats}}, f, ensure_ascii=False)
 
-def main():
-    fetch_data()
+def main(weekly=False):
+    fetch_data(force_sync=weekly)
     a_rows, a_stats = build_a()
     us_rows, us_stats = build_us()
     hk_rows, hk_stats = build_hk()
@@ -858,4 +928,9 @@ def main():
           "创业板=", sum(1 for r in hk_rows if r["board"]=="创业板"))
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser(description="生成股价创52周新低 HTML 日报")
+    ap.add_argument("--weekly", action="store_true",
+                    help="强制同步 universe（每周运行）；默认仅刷新行情（复用已同步的 codes 文件）")
+    args = ap.parse_args()
+    main(weekly=args.weekly)
