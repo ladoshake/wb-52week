@@ -608,6 +608,11 @@ var TABS = {
   us: { label:"美股", data: __DATA_US__, stats: __STATS_US__ },
   hk: { label:"港股", data: __DATA_HK__, stats: __STATS_HK__ }
 };
+// 全量 universe 代码（来自每周同步的 data/us_codes.json / hk_codes.json，gtimg 格式 usXXX / hkXXXXX）。
+// 扫描美股/港股时优先用全量 universe 重扫，从而捕捉「新跌入52周低点」的标的（不再冻结当前池）；
+// 若 universe 未同步（空数组），则回退为刷新当前表。
+var US_UNIVERSE = __UNIVERSE_US__;
+var HK_UNIVERSE = __UNIVERSE_HK__;
 var CUR = "a";
 var DATA, STATS, moduleField = "", moduleVal = "";
 
@@ -730,6 +735,16 @@ function marketOfA(code){
   if (code.indexOf("sz")===0) return "深圳";
   return "其他";
 }
+function usBoardOfSuffix(suffix){
+  // 与生成器 us_board_of_suffix 一致：.OQ/.O=纳斯达克；.N/.A=纽交所；其余=其他
+  if (suffix==="OQ" || suffix==="O") return "纳斯达克";
+  if (suffix==="N" || suffix==="A") return "纽交所";
+  return "其他";
+}
+function hkBoardOfCode(displayCode){
+  // 港交所：8xxxxx 为创业板(GEM)，其余(0xxxxx 等)为主板（与生成器 hk_board_of 一致）
+  return displayCode.charAt(0)==="8" ? "创业板" : "主板";
+}
 function mcapOf(mv){
   // 与生成器一致：值≥1e6 视为「元」需÷1e8，否则视为「亿」直接使用
   return mv >= 1e6 ? mv/1e8 : mv;
@@ -757,8 +772,9 @@ function parseGtimg(str, market, onRow){
     var wl = parseFloat(f[wlIdx]);
     var chg = parseFloat(f[32]) || 0;
     var mv = parseFloat(f[mvIdx]) || 0;
+    var exch = f[2] || "";
     if (!isFinite(cp) || !isFinite(wl) || cp<=0 || wl<=0) continue;
-    onRow({code:code, name:name, cp:cp, chg:chg, low:wl, mcap:mv});
+    onRow({code:code, name:name, cp:cp, chg:chg, low:wl, mcap:mv, exch:exch});
   }
 }
 // 并发批量拉取实时行情（gtimg 支持 CORS *），每批 ~80 个代码，单主机并发 8
@@ -812,7 +828,7 @@ function deriveCardsHKUS(rows, id){
     {v:cnt(function(r){return r.board==="纳斯达克";}),k:"纳斯达克",f:"board",v2:"纳斯达克"},
     {v:cnt(function(r){return r.board==="其他";}),k:"其他",f:"board",v2:"其他"} ];
 }
-var SCAN_LABELS = {a:"A股(全市场重扫)", hk:"港股(刷新当前池)", us:"美股(刷新当前池)"};
+var SCAN_LABELS = {a:"A股(全市场重扫)", hk:"港股(全量universe)", us:"美股(全量universe)"};
 function startScan(){
   var id = CUR;
   var btn = document.getElementById("scanBtn");
@@ -826,11 +842,21 @@ function startScan(){
     codes = genACodes(); market="a"; unit="亿";
     sub = "实时扫描(全市场)；收盘价距52周最低≤5%即计入（已排除新股及数据缺失）。";
   } else if (id==="hk"){
-    codes = DATA.map(function(r){ return "hk"+r.code; }); market="hk"; unit="亿";
-    sub = "实时刷新(当前港股池；美股/港股候选池冻结，未纳入新上市/新进池标的)。";
+    if (HK_UNIVERSE && HK_UNIVERSE.length){
+      codes = HK_UNIVERSE.slice(); market="hk"; unit="亿";
+      sub = "实时扫描(全量港股 universe)；收盘价距52周最低≤5%即计入（已排除新股及数据缺失）。";
+    } else {
+      codes = DATA.map(function(r){ return "hk"+r.code; }); market="hk"; unit="亿";
+      sub = "实时刷新(当前港股池；universe 未同步，仅刷新当前表)。";
+    }
   } else {
-    codes = DATA.map(function(r){ return "us"+r.code; }); market="us"; unit="亿美元";
-    sub = "实时刷新(当前美股池；美股/港股候选池冻结，未纳入新上市/新进池标的)。";
+    if (US_UNIVERSE && US_UNIVERSE.length){
+      codes = US_UNIVERSE.slice(); market="us"; unit="亿美元";
+      sub = "实时扫描(全量美股 universe)；收盘价距52周最低≤5%即计入（已排除新股及数据缺失）。";
+    } else {
+      codes = DATA.map(function(r){ return "us"+r.code; }); market="us"; unit="亿美元";
+      sub = "实时刷新(当前美股池；universe 未同步，仅刷新当前表)。";
+    }
   }
   fetchQuotes(codes, market, 80, function(done, total){
     prog.textContent = "扫描中 "+SCAN_LABELS[id]+"：" + done + "/" + total + " 批";
@@ -847,11 +873,11 @@ function startScan(){
       var displayCode = sc.slice(2);                            // 去掉 sh/sz/hk/us 前缀
       var board, mkt;
       if (id==="a"){ board = boardOfA(sc); mkt = marketOfA(sc); }
+      else if (id==="hk"){ board = hkBoardOfCode(displayCode); mkt = "港股"; }
       else {
-        var ex = null;
-        for (var j=0;j<DATA.length;j++){ if (DATA[j].code===displayCode){ ex=DATA[j]; break; } }
-        if (ex){ board = ex.board; mkt = ex.market; }
-        else { board = (id==="hk") ? (displayCode.charAt(0)==="8"?"创业板":"主板") : "其他"; mkt = (id==="hk")?"港股":"美股"; }
+        // 美股交易所从 gtimg 代码后缀判定（f[2]，如 AZO.N -> N -> 纽交所）
+        var suffix = (r.exch && r.exch.indexOf(".")>=0) ? r.exch.split(".").pop().toUpperCase() : "";
+        board = usBoardOfSuffix(suffix); mkt = "美股";
       }
       rows.push({ code: displayCode, name: r.name, cp: cp, chg: r.chg,
         low: wl, dist: dist, mcap: Math.round(mcapOf(r.mcap)*10)/10, market: mkt, board: board });
@@ -886,13 +912,26 @@ def render_html(a_rows, a_stats, us_rows, us_stats, hk_rows, hk_stats):
     us_stats_j = json.dumps(us_stats, ensure_ascii=False)
     hk_data = json.dumps(hk_rows, ensure_ascii=False)
     hk_stats_j = json.dumps(hk_stats, ensure_ascii=False)
+    # 全量 universe 代码（扫描美股/港股时用于全量重扫）。缺失则回退空数组（扫描回退刷新当前池）。
+    try:
+        us_uni = json.load(open(US_CODES, encoding="utf-8"))
+    except Exception:
+        us_uni = []
+    try:
+        hk_uni = json.load(open(HK_CODES, encoding="utf-8"))
+    except Exception:
+        hk_uni = []
+    us_uni_j = json.dumps(us_uni, ensure_ascii=False, separators=(",", ":"))
+    hk_uni_j = json.dumps(hk_uni, ensure_ascii=False, separators=(",", ":"))
     return (TEMPLATE
             .replace("__DATA_A__", a_data)
             .replace("__STATS_A__", a_stats_j)
             .replace("__DATA_US__", us_data)
             .replace("__STATS_US__", us_stats_j)
             .replace("__DATA_HK__", hk_data)
-            .replace("__STATS_HK__", hk_stats_j))
+            .replace("__STATS_HK__", hk_stats_j)
+            .replace("__UNIVERSE_US__", us_uni_j)
+            .replace("__UNIVERSE_HK__", hk_uni_j))
 
 def write_html(a_rows, a_stats, us_rows, us_stats, hk_rows, hk_stats):
     os.makedirs(HERE, exist_ok=True)
