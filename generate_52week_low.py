@@ -74,27 +74,56 @@ def _get_codes_from_file(path):
     except Exception:
         return []
 
+# 股票/基金过滤：universe 清单为"股票+基金+ETF"混合（无证券类型字段），
+# 故用「代码后缀(美股) + 名称语义(美股/港股)」启发式仅保留纯普通股/股票。
+# 美股：代码含 "_"（Series/Notes，如 AAPL22/ABR_D）或名称含 ETF/基金/债券/优先股/权证等 → 排除
+# 港股：名称含 ETF/基金/指数等关键词 → 排除（港股 ETF 名称集中，不可用代码段一刀切，否则误杀 028xx 段主板股票）
+_US_STOCK_RE = re.compile(
+    r"\bETF\b|\bETN\b|\bFund\b|\bFunds\b|\bIndex\b|Portfolio|Income|Yield|"
+    r"\bBond\b|Treasury|\bNote\b|\bNotes\b|Warrant|\bWt\b|\bWts\b|Right|Unit|"
+    r"Preferred|Pfd|Series [A-Z]|Proshares",
+    re.I)
+_HK_STOCK_RE = re.compile(
+    r"ETF|ETN|基金|指数|SPDR|iShares|盈富|领航|易方达|标智|安硕|南方东英|"
+    r"恒生指数|沪深300|标普|纳指", re.I)
+
+def _us_is_stock(rec):
+    """美股 universe 预筛：代码含 _（Series/Notes/Units/Warrants/SPAC）或非股票中文名 → 排除。
+    注：universe 清单 name 为中文，英文基金名(ETF/Fund)在消费端(gtimg 返回的英文名)再过滤。"""
+    if "_" in (rec.get("code") or ""):
+        return False
+    return not re.search(r"基金|ETF|ETN", rec.get("name") or "")
+
+def _hk_is_stock(rec):
+    """港股记录是否为纯股票（非 ETF/基金/指数产品）"""
+    return not _HK_STOCK_RE.search(rec.get("name") or "")
+
 def _sync_universe():
-    """从每周更新的全市场清单 (cloned_repo/assets/us_stocks.json, hk_stocks.json)
-    同步美股/港股 universe 代码（转 gtimg 格式），写入 data/us_codes.json / hk_codes.json。
-    冻结根因：8-17 westock-tool 被删除后不再生成 universe，near_us_raw.json/near_hk_raw.json
-    停留在 8-17 快照；改用此清单解冻。若清单缺失则回退到现有 near_*_raw.json 代码。"""
-    # 美股：裸 ticker -> us+ticker（含 .B 等后缀，gtimg 直接识别）
-    us_codes = []
+    """从每周更新的全市场清单同步美股/港股 universe（仅保留纯股票），写入 data/us_codes.json / hk_codes.json。
+    冻结根因：8-17 westock-tool 被删除后不再生成 universe；改用此清单解冻并过滤基金/ETF。
+    若清单缺失则回退到现有 near_*_raw.json 代码（不过滤）。"""
+    # 美股：裸 ticker -> us+ticker（含 .B 等后缀，gtimg 直接识别）；过滤非股票
+    us_codes, us_drop = [], 0
     try:
         d = json.load(open(US_UNIVERSE_JSON, encoding="utf-8"))
         for r in d:
+            if not _us_is_stock(r):
+                us_drop += 1
+                continue
             c = (r.get("code") or "").strip()
             if c:
                 us_codes.append("us" + c)
     except Exception as e:
         sys.stderr.write("读 %s 失败: %s，回退 near_us_raw.json\n" % (US_UNIVERSE_JSON, e))
         us_codes = _get_codes_from_file(RAW_US)
-    # 港股：5位裸代码 -> hk+补零到5位
-    hk_codes = []
+    # 港股：5位裸代码 -> hk+补零到5位；过滤非股票
+    hk_codes, hk_drop = [], 0
     try:
         d = json.load(open(HK_UNIVERSE_JSON, encoding="utf-8"))
         for r in d:
+            if not _hk_is_stock(r):
+                hk_drop += 1
+                continue
             c = (r.get("code") or "").strip()
             if c:
                 hk_codes.append("hk" + c.zfill(5))
@@ -105,7 +134,8 @@ def _sync_universe():
     hk_codes = list(dict.fromkeys(hk_codes))
     json.dump(us_codes, open(US_CODES, "w", encoding="utf-8"))
     json.dump(hk_codes, open(HK_CODES, "w", encoding="utf-8"))
-    print("UNIVERSE 同步: 美股 %d 个, 港股 %d 个 -> %s" % (len(us_codes), len(hk_codes), DATA))
+    print("UNIVERSE 同步: 美股 %d (过滤%d非股票) / 港股 %d (过滤%d非股票) -> %s"
+          % (len(us_codes), us_drop, len(hk_codes), hk_drop, DATA))
     return us_codes, hk_codes
 
 def _ensure_codes(market):
@@ -402,7 +432,13 @@ def build_us():
     rows = []
     for r in near:
         low = float(r["Week52Low"]); cp = float(r["ClosePrice"])
-        dist = round((cp - low) / low * 100, 2) if low else 0.0
+        if low <= 0:
+            continue
+        dist = round((cp - low) / low * 100, 2)
+        if dist > 5:
+            continue
+        if _US_STOCK_RE.search(r["name"]):   # 消费端英文名再过滤基金/ETF（universe 中文名无法命中）
+            continue
         m = meta.get(r["code"], {})
         g_mcap = m.get("mcap")
         # 优先用腾讯 gtimg 市值（单位稳定）；仅当 gtimg 完全缺失时才回退 westock（美股 TotalMV 不可靠）
@@ -438,7 +474,11 @@ def build_hk():
     rows = []
     for r in near:
         low = float(r["Week52Low"]); cp = float(r["ClosePrice"])
-        dist = round((cp - low) / low * 100, 2) if low else 0.0
+        if low <= 0:
+            continue
+        dist = round((cp - low) / low * 100, 2)
+        if dist > 5:
+            continue
         rows.append({
             "code": strip_code(r["code"]), "name": r["name"],
             "cp": cp, "chg": float(r["ChangePCT"]),
@@ -613,6 +653,9 @@ var TABS = {
 // 若 universe 未同步（空数组），则回退为刷新当前表。
 var US_UNIVERSE = __UNIVERSE_US__;
 var HK_UNIVERSE = __UNIVERSE_HK__;
+// 消费端英文名基金黑名单（对应 Python _US_STOCK_RE）：universe 清单 name 为中文无法命中，
+// 故对 gtimg 返回的英文名再过滤 ETF/ETN/Fund/Index/Portfolio/Bond/Note/Wts/Right/Unit/Preferred/Series/Proshares（保留 Trust/REIT）
+var FUND_RE = /\bETF\b|\bETN\b|\bFund\b|\bFunds\b|\bIndex\b|Portfolio|Income|Yield|\bBond\b|Treasury|\bNote\b|\bNotes\b|Warrant|\bWt\b|\bWts\b|Right|Unit|Preferred|Pfd|Series [A-Z]|Proshares/i;
 var CUR = "a";
 var DATA, STATS, moduleField = "", moduleVal = "";
 
@@ -869,6 +912,7 @@ function startScan(){
       if (r.name && r.name.charAt(0)==="N") continue;          // 跳过新股
       var dist = Math.round((cp - wl)/wl*100*100)/100;
       if (dist > 5) continue;
+      if (id!=="a" && FUND_RE.test(r.name)) continue;   // 美股/港股英文名再过滤基金/ETF（universe 中文名无法命中）
       var sc = r.code;
       var displayCode = sc.slice(2);                            // 去掉 sh/sz/hk/us 前缀
       var board, mkt;
