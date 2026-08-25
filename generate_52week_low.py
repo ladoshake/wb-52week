@@ -413,6 +413,21 @@ TEMPLATE = r"""<!DOCTYPE html>
          color:var(--muted); transition:.15s; user-select:none; }
   .tab:hover { border-color:var(--accent); color:var(--accent); }
   .tab.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .toolbar { display:flex; align-items:center; gap:10px; margin:2px 0 12px; }
+  .scan-btn { background:var(--accent); color:#fff; border:none; border-radius:9px;
+             padding:8px 16px; font-size:13px; font-weight:600; cursor:pointer;
+             display:inline-flex; align-items:center; gap:7px; transition:.15s; }
+  .scan-btn:hover { filter:brightness(1.06); }
+  .scan-btn:disabled { opacity:.65; cursor:default; }
+  .scan-btn .spin { width:13px; height:13px; border:2px solid rgba(255,255,255,.45);
+                    border-top-color:#fff; border-radius:50%; display:none;
+                    animation:spin .7s linear infinite; }
+  .scan-btn.busy .spin { display:inline-block; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .scan-prog { color:var(--muted); font-size:12px; }
+  .scan-bar { flex:1; height:4px; background:var(--line); border-radius:3px; overflow:hidden; display:none; min-width:60px; }
+  .scan-bar.on { display:block; }
+  .scan-bar > i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
   .cards { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:4px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:9px;
            padding:8px 14px; min-width:92px; flex:1; cursor:pointer; transition:.15s; user-select:none; }
@@ -451,6 +466,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     h1 { font-size:18px; margin-bottom:2px; }
     .sub { font-size:12px; line-height:1.4; margin-bottom:8px; }
     .tabs { gap:6px; } .tab { flex:1; text-align:center; padding:8px 6px; }
+    .toolbar { flex-wrap:wrap; gap:8px; } .scan-bar { order:3; flex-basis:100%; min-width:0; }
     .cards { display:grid; grid-template-columns:repeat(5,1fr); gap:4px; margin-bottom:4px; }
     .card { min-width:0; flex:none; padding:6px 2px; border-radius:8px; text-align:center; }
     .card .v { font-size:15px; }
@@ -476,6 +492,14 @@ TEMPLATE = r"""<!DOCTYPE html>
     <div class="tab active" data-tab="a" onclick="loadTab('a')">A股</div>
     <div class="tab" data-tab="hk" onclick="loadTab('hk')">港股</div>
     <div class="tab" data-tab="us" onclick="loadTab('us')">美股</div>
+  </div>
+
+  <div class="toolbar">
+    <button id="scanBtn" class="scan-btn" onclick="startScan()">
+      <span class="spin"></span><span id="scanLabel">扫描最新数据</span>
+    </button>
+    <span id="scanProg" class="scan-prog"></span>
+    <div class="scan-bar" id="scanBar"><i id="scanBarFill"></i></div>
   </div>
 
   <div class="cards" id="cards"></div>
@@ -613,6 +637,170 @@ function doSort(i,isStr,dir){
   var thEl=document.querySelectorAll('#t th')[i];
   thEl.classList.toggle('sort-asc', dir==='asc');
   thEl.classList.toggle('sort-desc', dir==='desc');
+}
+// ---- 实时扫描（纯前端，直接调腾讯 gtimg 行情接口，无需服务器） ----
+function genACodes(){
+  var codes = [];
+  for (var n=600000; n<=605999; n++) codes.push("sh"+("000000"+n).slice(-6));
+  for (var n=688000; n<=689999; n++) codes.push("sh"+("000000"+n).slice(-6));
+  for (var n=1; n<=3999; n++) codes.push("sz"+("000000"+n).slice(-6));
+  for (var n=300001; n<=301999; n++) codes.push("sz"+("000000"+n).slice(-6));
+  return codes;
+}
+function boardOfA(code){
+  var c = code.slice(2);
+  if (code.indexOf("sh688")===0) return "科创板";
+  if (code.indexOf("sh")===0) return "沪市主板";
+  if (c.indexOf("30")===0) return "创业板";
+  if (c.indexOf("00")===0 || c.indexOf("001")===0 || c.indexOf("002")===0 || c.indexOf("003")===0) return "深市主板";
+  return "其他";
+}
+function marketOfA(code){
+  if (code.indexOf("sh")===0) return "上海";
+  if (code.indexOf("sz")===0) return "深圳";
+  return "其他";
+}
+function mcapOf(mv){
+  // 与生成器一致：值≥1e6 视为「元」需÷1e8，否则视为「亿」直接使用
+  return mv >= 1e6 ? mv/1e8 : mv;
+}
+function gbkDecode(buf){
+  if (typeof buf === "string") return buf;
+  try { return new TextDecoder("gbk").decode(buf); } catch(e){ return new TextDecoder("utf-8").decode(buf); }
+}
+// 解析一段 GBK 文本（多行 v_xxx="...";），对每条有效记录回调 onRow
+function parseGtimg(str, market, onRow){
+  var mvIdx = (market==="us") ? 45 : 44;
+  var wlIdx = (market==="hk") ? 49 : ((market==="us") ? 49 : 68);
+  var lines = str.split("\n");
+  for (var i=0;i<lines.length;i++){
+    var line = lines[i].trim();
+    if (line.indexOf("v_")!==0) continue;
+    var eq = line.indexOf("="); if (eq<0) continue;
+    var code = line.slice(2, eq);
+    var q1 = line.indexOf('"'); if (q1<0) continue;
+    var payload = line.slice(q1+1, line.lastIndexOf('"'));
+    var f = payload.split("~");
+    if (f.length <= Math.max(wlIdx, mvIdx, 32, 3)) continue;
+    var name = f[1];
+    var cp = parseFloat(f[3]);
+    var wl = parseFloat(f[wlIdx]);
+    var chg = parseFloat(f[32]) || 0;
+    var mv = parseFloat(f[mvIdx]) || 0;
+    if (!isFinite(cp) || !isFinite(wl) || cp<=0 || wl<=0) continue;
+    onRow({code:code, name:name, cp:cp, chg:chg, low:wl, mcap:mv});
+  }
+}
+// 并发批量拉取实时行情（gtimg 支持 CORS *），每批 ~80 个代码，单主机并发 8
+function fetchQuotes(codes, market, batchSize, onBatch){
+  var results = [];
+  var total = Math.ceil(codes.length / batchSize);
+  var done = 0, active = 0, idx = 0, MAXCON = 6;
+  return new Promise(function(resolve){
+    function pump(){
+      while (active < MAXCON && idx < total){
+        var b = idx++; active++;
+        var chunk = codes.slice(b*batchSize, b*batchSize+batchSize);
+        var url = "https://qt.gtimg.cn/q=" + chunk.join(",");
+        fetch(url, {headers:{Referer:"https://gu.qq.com/"}})
+          .then(function(r){ return r.arrayBuffer(); })
+          .then(function(buf){ parseGtimg(gbkDecode(buf), market, function(row){ results.push(row); }); })
+          .catch(function(){ })
+          .then(function(){ active--; done++; onBatch(done, total);
+            if (idx < total) pump(); else if (active===0) resolve(results); });
+      }
+      if (total===0) resolve(results);
+    }
+    pump();
+  });
+}
+function nowStr(){
+  var d = new Date(), p = function(x){ return (x<10?"0":"")+x; };
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes());
+}
+function buildStatsA(rows){
+  function cnt(p){ return rows.filter(p).length; }
+  return { now: nowStr(), near_n: rows.length, mcap_unit: "亿",
+    sub: "实时扫描(全市场)；收盘价距52周最低≤5%即计入（已排除新股及数据缺失）。",
+    cards: [
+      {v: rows.length, k:"全部", f:"", v2:""},
+      {v: cnt(function(r){return r.board==="沪市主板";}), k:"沪市主板", f:"board", v2:"沪市主板"},
+      {v: cnt(function(r){return r.board==="深市主板";}), k:"深市主板", f:"board", v2:"深市主板"},
+      {v: cnt(function(r){return r.board==="科创板";}), k:"科创板", f:"board", v2:"科创板"},
+      {v: cnt(function(r){return r.board==="创业板";}), k:"创业板", f:"board", v2:"创业板"}
+    ] };
+}
+function deriveCardsHKUS(rows, id){
+  function cnt(p){ return rows.filter(p).length; }
+  if (id==="hk"){
+    return [ {v:rows.length,k:"全部",f:"",v2:""},
+      {v:cnt(function(r){return r.board==="主板";}),k:"主板",f:"board",v2:"主板"},
+      {v:cnt(function(r){return r.board==="创业板";}),k:"创业板",f:"board",v2:"创业板"} ];
+  }
+  return [ {v:rows.length,k:"全部",f:"",v2:""},
+    {v:cnt(function(r){return r.board==="纽交所";}),k:"纽交所",f:"board",v2:"纽交所"},
+    {v:cnt(function(r){return r.board==="纳斯达克";}),k:"纳斯达克",f:"board",v2:"纳斯达克"},
+    {v:cnt(function(r){return r.board==="其他";}),k:"其他",f:"board",v2:"其他"} ];
+}
+var SCAN_LABELS = {a:"A股(全市场重扫)", hk:"港股(刷新当前池)", us:"美股(刷新当前池)"};
+function startScan(){
+  var id = CUR;
+  var btn = document.getElementById("scanBtn");
+  var prog = document.getElementById("scanProg");
+  var bar = document.getElementById("scanBar");
+  var fill = document.getElementById("scanBarFill");
+  btn.disabled = true; btn.classList.add("busy"); bar.classList.add("on");
+  prog.textContent = "准备扫描 " + SCAN_LABELS[id] + " …";
+  var codes, market, unit, sub;
+  if (id==="a"){
+    codes = genACodes(); market="a"; unit="亿";
+    sub = "实时扫描(全市场)；收盘价距52周最低≤5%即计入（已排除新股及数据缺失）。";
+  } else if (id==="hk"){
+    codes = DATA.map(function(r){ return "hk"+r.code; }); market="hk"; unit="亿";
+    sub = "实时刷新(当前港股池；美股/港股候选池冻结，未纳入新上市/新进池标的)。";
+  } else {
+    codes = DATA.map(function(r){ return "us"+r.code; }); market="us"; unit="亿美元";
+    sub = "实时刷新(当前美股池；美股/港股候选池冻结，未纳入新上市/新进池标的)。";
+  }
+  fetchQuotes(codes, market, 80, function(done, total){
+    prog.textContent = "扫描中 "+SCAN_LABELS[id]+"：" + done + "/" + total + " 批";
+    fill.style.width = (total ? done/total*100 : 100) + "%";
+  }).then(function(rowsRaw){
+    var rows = [];
+    for (var i=0;i<rowsRaw.length;i++){
+      var r = rowsRaw[i];
+      var cp = r.cp, wl = r.low;
+      if (r.name && r.name.charAt(0)==="N") continue;          // 跳过新股
+      var dist = Math.round((cp - wl)/wl*100*100)/100;
+      if (dist > 5) continue;
+      var sc = r.code;
+      var displayCode = sc.slice(2);                            // 去掉 sh/sz/hk/us 前缀
+      var board, mkt;
+      if (id==="a"){ board = boardOfA(sc); mkt = marketOfA(sc); }
+      else {
+        var ex = null;
+        for (var j=0;j<DATA.length;j++){ if (DATA[j].code===displayCode){ ex=DATA[j]; break; } }
+        if (ex){ board = ex.board; mkt = ex.market; }
+        else { board = (id==="hk") ? (displayCode.charAt(0)==="8"?"创业板":"主板") : "其他"; mkt = (id==="hk")?"港股":"美股"; }
+      }
+      rows.push({ code: displayCode, name: r.name, cp: cp, chg: r.chg,
+        low: wl, dist: dist, mcap: Math.round(mcapOf(r.mcap)*10)/10, market: mkt, board: board });
+    }
+    rows.sort(function(x,y){ return x.chg - y.chg; });
+    var stats = (id==="a") ? buildStatsA(rows)
+      : { now: nowStr(), near_n: rows.length, mcap_unit: unit, sub: sub, cards: deriveCardsHKUS(rows, id) };
+    TABS[id] = { label: TABS[id].label, data: rows, stats: stats };
+    moduleField=""; moduleVal="";
+    document.getElementById("sub").textContent = "实时扫描更新：" + stats.now + " · 腾讯自选股（仅供参考）";
+    document.getElementById("mcapHead").textContent = "总市值(" + stats.mcap_unit + ")";
+    document.getElementById("mcapUnit").textContent = stats.mcap_unit;
+    document.getElementById("noteNear").textContent = stats.near_n;
+    buildCards(); buildRows(); render();
+    fill.style.width = "100%";
+    prog.textContent = "完成：" + SCAN_LABELS[id] + " 共 " + rows.length + " 只（距52周低点≤5%）";
+    btn.disabled = false; btn.classList.remove("busy");
+    setTimeout(function(){ bar.classList.remove("on"); }, 900);
+  });
 }
 // 初始化
 loadTab('a');
