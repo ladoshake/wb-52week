@@ -428,6 +428,7 @@ function startScan(){
     var stats = (id==="a") ? buildStatsA(rows)
       : { now: nowStr(), near_n: rows.length, mcap_unit: unit, sub: sub, cards: deriveCardsHKUS(rows, id) };
     TABS[id] = { label: TABS[id].label, data: rows, stats: stats };
+    DATA = rows; STATS = stats;   // 同步全局，供 buildRows/buildCards 渲染扫描后的新数据
     moduleField=""; moduleVal="";
     document.getElementById("sub").textContent = "实时扫描更新：" + stats.now + " · 腾讯自选股（仅供参考）";
     document.getElementById("mcapHead").textContent = "总市值(" + stats.mcap_unit + ")";
