@@ -156,6 +156,29 @@ var HK_UNIVERSE = ["hk00001","hk00002","hk00003","hk00004","hk00005","hk00006","
 var FUND_RE = /\bETF\b|\bETN\b|\bFund\b|\bFunds\b|\bIndex\b|Portfolio|Income|Yield|\bBond\b|Treasury|\bNote\b|\bNotes\b|Warrant|\bWt\b|\bWts\b|Right|Unit|Preferred|Pfd|Series [A-Z]|Proshares/i;
 var CUR = "a";
 var DATA, STATS, moduleField = "", moduleVal = "";
+// 本地缓存：扫描结果写入 localStorage，下次打开优先作为默认数据（按市场分别缓存）
+var SCAN_CACHE_KEY = "wb52week_scan_cache_v1";
+function loadScanCache(){
+  try { return JSON.parse(localStorage.getItem(SCAN_CACHE_KEY)) || {}; }
+  catch(e){ return {}; }
+}
+function saveScanCache(id, rows, stats){
+  if (!rows || !rows.length) return;
+  var c = loadScanCache();
+  c.v = 1; c.ts = Date.now();
+  c[id] = { data: rows, stats: stats };
+  try { localStorage.setItem(SCAN_CACHE_KEY, JSON.stringify(c)); } catch(e){}
+}
+function applyScanCache(){
+  var c = loadScanCache();
+  ['a','us','hk'].forEach(function(id){
+    if (c[id] && c[id].data && c[id].data.length){
+      TABS[id].data = c[id].data;
+      TABS[id].stats = c[id].stats;
+      if (TABS[id].stats) TABS[id].stats.cached = true;
+    }
+  });
+}
 
 function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function fmtMcap(v){
@@ -171,7 +194,8 @@ function loadTab(id){
   var t = TABS[id];
   DATA = t.data; STATS = t.stats;
   moduleField = ""; moduleVal = "";
-  document.getElementById('sub').textContent = STATS.sub + "更新：" + STATS.now + " · 腾讯自选股（仅供参考）";
+  var subPrefix = STATS.cached ? "[本地缓存] " : "";
+  document.getElementById('sub').textContent = subPrefix + STATS.sub + "更新：" + STATS.now + " · 腾讯自选股（仅供参考）";
   document.getElementById('noteNear').textContent = STATS.near_n;
   document.getElementById('mcapHead').textContent = "总市值(" + STATS.mcap_unit + ")";
   document.getElementById('mcapUnit').textContent = STATS.mcap_unit;
@@ -429,6 +453,7 @@ function startScan(){
       : { now: nowStr(), near_n: rows.length, mcap_unit: unit, sub: sub, cards: deriveCardsHKUS(rows, id) };
     TABS[id] = { label: TABS[id].label, data: rows, stats: stats };
     DATA = rows; STATS = stats;   // 同步全局，供 buildRows/buildCards 渲染扫描后的新数据
+    saveScanCache(id, rows, stats);   // 持久化到 localStorage，下次打开作为默认数据
     moduleField=""; moduleVal="";
     document.getElementById("sub").textContent = "实时扫描更新：" + stats.now + " · 腾讯自选股（仅供参考）";
     document.getElementById("mcapHead").textContent = "总市值(" + stats.mcap_unit + ")";
@@ -442,6 +467,7 @@ function startScan(){
   });
 }
 // 初始化
+applyScanCache();   // 用上次扫描的缓存覆盖首屏默认数据（按市场）
 loadTab('a');
 </script>
 </body>
