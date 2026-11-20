@@ -167,7 +167,7 @@ def fetch_one(outp, market):
         # A股: 生成全量代码（沪市主板+科创+深市主板+创业），确保不遗漏新进入52周低点区域的股票
         codes = _gen_a_codes()
         wl_idx = WL_IDX_A
-        mv_idx = 44  # A股总市值(亿元)
+        mv_idx = 45  # A股总市值(亿元)：f[44]是流通市值，f[45]才是总市值（长鑫科技 1614 vs 24336 亿）
         print("  候选池:", len(codes), "个 A股代码 (全量生成)")
     elif market == "us":
         codes = _ensure_codes("us")
@@ -182,7 +182,7 @@ def fetch_one(outp, market):
     else:
         codes = []
         wl_idx = WL_IDX_A
-        mv_idx = 44
+        mv_idx = 45  # 与 A股一致：f[45]=总市值
 
     if not codes:
         print("  警告: 候选池为空，写入空数组")
@@ -822,7 +822,7 @@ function gbkDecode(buf){
 }
 // 解析一段 GBK 文本（多行 v_xxx="...";），对每条有效记录回调 onRow
 function parseGtimg(str, market, onRow){
-  var mvIdx = (market==="us") ? 45 : 44;
+  var mvIdx = (market==="hk") ? 44 : 45;  // A股/美股用 f[45]=总市值；f[44] 对 A股是流通市值（长鑫科技等差异巨大）
   var wlIdx = (market==="hk") ? 49 : ((market==="us") ? 49 : 68);
   var lines = str.split("\n");
   for (var i=0;i<lines.length;i++){
