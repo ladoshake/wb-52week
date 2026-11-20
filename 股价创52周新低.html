@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<html lang="zh-CN" data-page-node-id="bI0xIPDxOCRLDgn5Tw3Dzh">
+<head data-page-node-id="sf2AdSrCGoC7xDTWo6XtUE">
+<meta charset="utf-8" data-page-node-id="5kC0zIgAsmzVpdJm67QyVz">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" data-page-node-id="A6XK0VzdkAmklnruFIykFo">
 <title>股价创52周新低 公司列表（A股 / 美股）</title>
 <style>
   :root {
@@ -91,51 +91,51 @@
 </script>
 <script defer src="/_vercel/insights/script.js"></script>
 </head>
-<body>
-<div class="wrap">
-  <h1>股价创52周新低 · 公司列表</h1>
-  <div class="sub" id="sub"></div>
+<body data-page-node-id="5ppb6aVqAUm2rkUIP6F7Ax">
+<div class="wrap" data-page-node-id="4V8EsBuMNVWrBov04bIgqm">
+  <h1 data-page-node-id="ABJNUkSzea08xIhxPlVJ2e">股价创52周新低 · 公司列表</h1>
+  <div class="sub" id="sub" data-page-node-id="ZzWP4rOd153DbiM50yAkde"></div>
 
-  <div class="tabs">
-    <div class="tab active" data-tab="a" onclick="loadTab('a')">A股</div>
-    <div class="tab" data-tab="hk" onclick="loadTab('hk')">港股</div>
-    <div class="tab" data-tab="us" onclick="loadTab('us')">美股</div>
+  <div class="tabs" data-page-node-id="aAb5tr3FgPRg5lDgIUqcKD">
+    <div class="tab active" data-tab="a" onclick="loadTab('a')" data-page-node-id="sqlxLKSD1UwmGO0Fol5NtV">A股</div>
+    <div class="tab" data-tab="hk" onclick="loadTab('hk')" data-page-node-id="h2CVlB0DmygYiVFlHl50Hi">港股</div>
+    <div class="tab" data-tab="us" onclick="loadTab('us')" data-page-node-id="vNHYOsv0NfqVKm6cuibqX6">美股</div>
   </div>
 
-  <div class="toolbar">
-    <button id="scanBtn" class="scan-btn" onclick="startScan()">
-      <span class="spin"></span><span id="scanLabel">扫描最新数据</span>
+  <div class="toolbar" data-page-node-id="HkEI9J43CN1mUqqX8b7FQE">
+    <button id="scanBtn" class="scan-btn" onclick="startScan()" data-page-node-id="06pd657EXzJ2iQ7w7KMjsW">
+      <span class="spin" data-page-node-id="iv5PQMsQAHHa2EWF3xAQzm"></span><span id="scanLabel" data-page-node-id="xC1P7LwrEIoams33gpe7QC">扫描最新数据</span>
     </button>
-    <span id="scanProg" class="scan-prog"></span>
-    <div class="scan-bar" id="scanBar"><i id="scanBarFill"></i></div>
+    <span id="scanProg" class="scan-prog" data-page-node-id="WigwFxbzjEM7hzKHEzAAbT"></span>
+    <div class="scan-bar" id="scanBar" data-page-node-id="6l1CFznV2jFOmpCc3qxCp5"><i id="scanBarFill" data-page-node-id="n8jY16KJgsrPp9yy19P8fx"></i></div>
   </div>
 
-  <div class="cards" id="cards"></div>
-  <div class="hint" id="hint"></div>
+  <div class="cards" id="cards" data-page-node-id="OUim4bvRmFDcWICa5H6fMU"></div>
+  <div class="hint" id="hint" data-page-node-id="xSen88Z4LdvW47AU7qsiXK"></div>
 
-  <div class="table-scroll">
-  <table id="t">
-    <thead><tr>
-      <th onclick="sortCol(0,false)">序号</th>
-      <th onclick="sortCol(1,true)">代码</th>
-      <th onclick="sortCol(2,true)">名称</th>
-      <th class="num" onclick="sortCol(3,false)">最新价</th>
-      <th class="num" onclick="sortCol(4,false)">涨跌幅</th>
-      <th class="num" onclick="sortCol(5,false)">52周最低</th>
-      <th class="num" onclick="sortCol(6,false)">距52周低点</th>
-      <th class="num" id="mcapHead" onclick="sortCol(7,false)">总市值(亿)</th>
-      <th onclick="sortCol(8,true)">板块</th>
+  <div class="table-scroll" data-page-node-id="9CybnrteEiixGpTu62fZnW">
+  <table id="t" data-page-node-id="aWy0aQUw3zEjiabzpF4G2v">
+    <thead data-page-node-id="yGIBamC3d5gdZk1G6LQMRt"><tr data-page-node-id="lSUYvdeZFOxUYc31E92jC8">
+      <th onclick="sortCol(0,false)" data-page-node-id="Tw3pKhPyq8Hjs9zZHoMozk">序号</th>
+      <th onclick="sortCol(1,true)" data-page-node-id="pHYbLiynVZUMmrBE6zRQzw">代码</th>
+      <th onclick="sortCol(2,true)" data-page-node-id="wAttrQo4NPfRIJnFKI7GWz">名称</th>
+      <th class="num" onclick="sortCol(3,false)" data-page-node-id="fgVp3fNnNJPFT2G164LVAt">最新价</th>
+      <th class="num" onclick="sortCol(4,false)" data-page-node-id="oUohSJAdAvAFT51nT6NC2B">涨跌幅</th>
+      <th class="num" onclick="sortCol(5,false)" data-page-node-id="jyz1Zleol8VNYqI8dPFcxu">52周最低</th>
+      <th class="num" onclick="sortCol(6,false)" data-page-node-id="kj7ZOWlEikSLeAraDBCpjG">距52周低点</th>
+      <th class="num" id="mcapHead" onclick="sortCol(7,false)" data-page-node-id="foi0gAzwKr2HmI0KJVzgmw">总市值(亿)</th>
+      <th onclick="sortCol(8,true)" data-page-node-id="HadT4BaKobJtRsj3db7BxE">板块</th>
     </tr></thead>
-    <tbody id="tbody"></tbody>
+    <tbody id="tbody" data-page-node-id="IePYoPV30qAEoxyLTeEw52"></tbody>
   </table>
   </div>
-  <div id="empty">当前没有符合条件的股票。</div>
+  <div id="empty" data-page-node-id="AeAzVcHq97alsVDYkkaM7j">当前没有符合条件的股票。</div>
 
-  <div class="note">
-    <span class="tag">口径</span>
-    “收盘价距52周最低 ≤ 5%”：收盘收在历史最低上方 5% 以内（含等于或低于）即计入，当前共 <b id="noteNear">__NEAR__</b> 只。<br>
-    <span class="tag">说明</span>
-    "距52周低点" = (最新价 − 52周最低) / 52周最低；"总市值"单位为<span id="mcapUnit">亿</span>。点击模块卡片可一键筛选；点击任意表头可按该列升降序排序。<br>
+  <div class="note" data-page-node-id="foHGsTIGB0Tn7dYBAGhH4L">
+    <span class="tag" data-page-node-id="iaqZVspvfpBkR69XBt4R7L">口径</span>
+    “收盘价距52周最低 ≤ 5%”：收盘收在历史最低上方 5% 以内（含等于或低于）即计入，当前共 <b id="noteNear" data-page-node-id="gg6kDQM7D1rRZWwjSCaBeW">__NEAR__</b> 只。<br data-page-node-id="MvaruO0rI4nUc2P4KQTcN7">
+    <span class="tag" data-page-node-id="kFskDDQOvzThIjB0sbhu8u">说明</span>
+    "距52周低点" = (最新价 − 52周最低) / 52周最低；"总市值"单位为<span id="mcapUnit" data-page-node-id="WxjRVL9LGJOYCJQyoantCf">亿</span>。点击模块卡片可一键筛选；点击任意表头可按该列升降序排序。<br data-page-node-id="2ZcKpX2dpZJa0SzxrP97TC">
     本报告仅作客观数据筛选与展示，不构成任何投资建议。市场有风险，决策需谨慎。
   </div>
 </div>
@@ -320,7 +320,7 @@ function gbkDecode(buf){
 }
 // 解析一段 GBK 文本（多行 v_xxx="...";），对每条有效记录回调 onRow
 function parseGtimg(str, market, onRow){
-  var mvIdx = (market==="us") ? 45 : 44;
+  var mvIdx = (market==="hk") ? 44 : 45;  // A股/美股用 f[45]=总市值；f[44] 对 A股是流通市值（长鑫科技等差异巨大）
   var wlIdx = (market==="hk") ? 49 : ((market==="us") ? 49 : 68);
   var lines = str.split("\n");
   for (var i=0;i<lines.length;i++){
